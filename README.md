@@ -1,3 +1,5 @@
+
+
 # OpenSceneSense
 
 **OpenSceneSense** is a cutting-edge Python package that revolutionizes video analysis by seamlessly integrating OpenAI and OpenRouter Vision models. Unlock the full potential of your videos with advanced frame analysis, audio transcription, dynamic frame selection, and comprehensive summaries all powered by state-of-the-art AI.
@@ -263,7 +265,7 @@ By leveraging powerful prompts and contextual tags, OpenSceneSense can provide i
 
 With prompt-driven analysis, OpenSceneSense can become your intelligent partner in interpreting video content, whether for content moderation, dataset creation, or building interactive applications that respond to visual and audio cues naturally.
 
-For a comprehensive list of innovative video analysis prompts, refer to the [Prompt Examples](docs/InnovativeVideoAnalysisPrompts.md).
+For a comprehensive list of innovative video analysis prompts, refer to the [Prompt Examples](Docs/prompts.md).
 Note: By default, OpenSceneSense uses OpenAI's modern Responses API when available and
 falls back to Chat Completions automatically for compatibility (including OpenRouter).
 
