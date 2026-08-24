@@ -158,6 +158,8 @@ def test_openrouter_uses_chat_schema_and_classifies_connection_error():
     assert analysis.description == "valid"
     assert usage.total_tokens == 5
     assert chat.calls[0]["response_format"]["type"] == "json_schema"
+    request_content = chat.calls[0]["messages"][0]["content"]
+    assert request_content[-1]["text"].startswith("Return only a JSON object")
 
     failing = Chat([StatusError(500)])
     provider = OpenRouterProvider(
@@ -165,3 +167,27 @@ def test_openrouter_uses_chat_schema_and_classifies_connection_error():
     )
     with pytest.raises(ProviderConnectionError):
         provider.generate_summary("prompt", "timeline", "transcript")
+
+
+def test_openrouter_repairs_unstructured_frame_response_once():
+    chat = Chat(["A person is preparing a pizza.", _frame_payload(description="pizza prep")])
+    provider = OpenRouterProvider(
+        SimpleNamespace(chat=SimpleNamespace(completions=chat)), "vision", "summary"
+    )
+
+    analysis, usage = provider.analyze_frame(Frame(None, 0, SceneType.STATIC), "image", "prompt")
+
+    assert analysis.description == "pizza prep"
+    assert usage.total_tokens == 10
+    assert len(chat.calls) == 2
+    assert chat.calls[1]["messages"][0]["content"].startswith("Convert this frame description")
+
+
+def test_openrouter_rejects_invalid_frame_repair():
+    chat = Chat(["not json", _frame_payload(objects="not-an-array")])
+    provider = OpenRouterProvider(
+        SimpleNamespace(chat=SimpleNamespace(completions=chat)), "vision", "summary"
+    )
+
+    with pytest.raises(ResponseValidationError, match="after repair"):
+        provider.analyze_frame(Frame(None, 0, SceneType.STATIC), "image", "prompt")

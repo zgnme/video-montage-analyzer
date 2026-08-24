@@ -288,6 +288,7 @@ More detail:
 - [Transcription](Docs/transcription.md)
 - [Performance](Docs/performance.md)
 - [Troubleshooting](Docs/troubleshooting.md)
+- [Live release validation](Docs/live-validation.md)
 - [v1.2 migration](Docs/v1.2-migration.md)
 
 ## License and support

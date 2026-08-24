@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from openai import OpenAI
@@ -17,6 +18,7 @@ from .base import (
     SUMMARY_OUTPUT_SCHEMA,
     ProviderAdapter,
     frame_analysis_from_payload,
+    merge_usage,
     parse_json_object,
     summary_from_payload,
     usage_from_response,
@@ -49,10 +51,18 @@ class OpenRouterProvider(ProviderAdapter):
         schema_name: str,
         schema: dict[str, Any],
     ) -> tuple[str, Any]:
+        schema_instruction = (
+            "Return only a JSON object matching this exact schema. Do not use Markdown or add "
+            f"other keys: {json.dumps(schema, separators=(',', ':'))}"
+        )
+        if isinstance(content, list):
+            request_content = [*content, {"type": "text", "text": schema_instruction}]
+        else:
+            request_content = f"{content}\n\n{schema_instruction}"
         try:
             response = self.client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": content}],
+                messages=[{"role": "user", "content": request_content}],
                 response_format={
                     "type": "json_schema",
                     "json_schema": {"name": schema_name, "strict": True, "schema": schema},
@@ -80,11 +90,29 @@ class OpenRouterProvider(ProviderAdapter):
         )
         try:
             analysis = frame_analysis_from_payload(frame, parse_json_object(output))
-            if not analysis.description:
-                raise ValueError("description is empty")
             return analysis, usage_from_response(response)
         except (TypeError, ValueError) as exc:
-            raise ResponseValidationError(f"Invalid frame-analysis response: {exc}") from exc
+            repair_prompt = (
+                "Convert this frame description to JSON matching the required schema. "
+                "The description must be non-empty; objects, actions, visible_text, and tags must "
+                "be arrays of strings. Preserve only stated facts and do not add details:\n"
+                + output
+            )
+            repaired, repair_response = self._chat(
+                self.vision_model,
+                repair_prompt,
+                "frame_analysis",
+                FRAME_OUTPUT_SCHEMA,
+            )
+            try:
+                analysis = frame_analysis_from_payload(frame, parse_json_object(repaired))
+                usage = usage_from_response(response)
+                merge_usage(usage, usage_from_response(repair_response))
+                return analysis, usage
+            except (TypeError, ValueError) as repair_exc:
+                raise ResponseValidationError(
+                    f"Invalid frame-analysis response after repair: {repair_exc}"
+                ) from exc
 
     def generate_summary(
         self, prompt: str, timeline_text: str, transcript: str

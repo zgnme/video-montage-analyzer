@@ -13,8 +13,12 @@ running anything during package import.
   not trigger endpoint fallback.
 - **Partial frame failures:** inspect `warnings`, `errors`, and frame-level `error`; lower
   concurrency or increase timeout. The configured failure-ratio ceiling still aborts bad runs.
-- **Schema failures:** keep structured output enabled and inspect the warning if deterministic
-  fallback was used.
+- **OpenRouter shared-pool throttling:** use `max_workers=1` for a rate-limited model and enable a
+  cache with `--resume` so completed frames survive retries. A provider-side HTTP 429 is surfaced as
+  `RateLimitError`; the library does not silently switch models.
+- **Schema failures:** OpenRouter requests include both `response_format` and an explicit schema
+  instruction. One text-only repair is attempted when a routed vision provider ignores the format;
+  invalid repaired output still fails validation.
 - **Cache surprises:** caches are keyed by video fingerprint and analysis configuration. Use
   `--force` to ignore resume state, or select a new cache directory.
 

@@ -18,6 +18,8 @@
 - Frames are resized and encoded as JPEG before submission.
 - `analyze_video()` retains the legacy dictionary and now includes additive telemetry.
 - Endpoint fallback is opt-in and limited to unsupported endpoints.
+- OpenRouter now includes an explicit schema instruction and one validated text-only repair for
+  routed vision models that ignore `response_format`.
 
 ### Removed
 

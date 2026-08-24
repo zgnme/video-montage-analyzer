@@ -11,7 +11,7 @@ FRAME_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["description", "objects", "actions", "visible_text", "tags"],
     "properties": {
-        "description": {"type": "string"},
+        "description": {"type": "string", "minLength": 1},
         "objects": {"type": "array", "items": {"type": "string"}},
         "actions": {"type": "array", "items": {"type": "string"}},
         "visible_text": {"type": "array", "items": {"type": "string"}},
@@ -25,8 +25,8 @@ SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["detailed", "brief", "events"],
     "properties": {
-        "detailed": {"type": "string"},
-        "brief": {"type": "string"},
+        "detailed": {"type": "string", "minLength": 1},
+        "brief": {"type": "string", "minLength": 1},
         "events": {
             "type": "array",
             "items": {
@@ -44,7 +44,7 @@ SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "start_time": {"type": "number"},
                     "end_time": {"type": "number"},
-                    "description": {"type": "string"},
+                    "description": {"type": "string", "minLength": 1},
                     "source_frame_timestamps": {"type": "array", "items": {"type": "number"}},
                     "objects": {"type": "array", "items": {"type": "string"}},
                     "actions": {"type": "array", "items": {"type": "string"}},
