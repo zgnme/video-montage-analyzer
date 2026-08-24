@@ -30,7 +30,7 @@ Frame-based analysis focuses on extracting detailed information from individual 
 This prompt directs the model to meticulously identify objects within a frame and understand their interactions and actions, providing a detailed snapshot of the scene.
 
 **Use Cases:**
-- **Security Surveillance:** Detect and describe suspicious activities in real-time.
+- **Security review:** Describe relevant activities in recorded footage for human review.
 - **Retail Analytics:** Monitor customer interactions with products on shelves.
 - **Autonomous Vehicles:** Identify obstacles and actions within the vehicle’s environment.
 
@@ -64,7 +64,7 @@ Encourages the model to evaluate the broader environmental context of a frame, u
 **Use Cases:**
 - **Film Production:** Evaluate shooting conditions and their impact on scene aesthetics.
 - **Virtual Reality:** Enhance realistic environment rendering based on contextual analysis.
-- **Environmental Monitoring:** Detect and report on environmental changes in real-time footage.
+- **Environmental review:** Describe visible environmental changes in recorded footage.
 
 ---
 
@@ -370,5 +370,4 @@ To maximize the effectiveness of your prompts within **OpenSceneSense**, conside
 ## 6. Conclusion
 
 These innovative prompt examples are tailored to fit **OpenSceneSense**'s `AnalysisPrompts` structure, providing specialized prompts for **Frame-Based Analysis**, **Detailed Summaries**, and **Brief Summaries**. By integrating these prompts into your workflows, you can unlock deeper insights and build more sophisticated video analysis applications. Customize and expand upon these examples to explore new possibilities and enhance your projects with intelligent video-centric solutions.
-
 

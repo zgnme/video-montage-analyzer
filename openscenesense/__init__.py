@@ -1,39 +1,88 @@
-from openscenesense.models import ModelConfig, Frame, AudioSegment, AnalysisPrompts, SceneType
-from openscenesense.analyzer import VideoAnalyzer
-from openscenesense.openrouter_analyzer import OpenRouterAnalyzer
-from openscenesense.frame_selectors import FrameSelector, DynamicFrameSelector, UniformFrameSelector
+from .analyzer import VideoAnalyzer
+from .diagnostics import check_environment, check_ffmpeg
+from .exceptions import (
+    AudioExtractionError,
+    AuthenticationError,
+    ConfigurationError,
+    MissingDependencyError,
+    ModelCapabilityError,
+    ModelNotFoundError,
+    OpenSceneSenseError,
+    ProviderConnectionError,
+    RateLimitError,
+    ResponseValidationError,
+    TranscriptionError,
+    VideoLoadError,
+    VideoMetadataError,
+)
+from .frame_selectors import DynamicFrameSelector, FrameSelector, UniformFrameSelector
+from .models import (
+    ANALYSIS_RESULT_SCHEMA,
+    AnalysisMetadata,
+    AnalysisPrompts,
+    AnalysisResult,
+    AudioSegment,
+    Frame,
+    FrameAnalysis,
+    ModelConfig,
+    ModelsUsed,
+    PerformanceMetadata,
+    SceneType,
+    SelectionMetadata,
+    SelectionReason,
+    SummaryResult,
+    TimelineEvent,
+    UsageMetadata,
+    VideoMetadata,
+    analysis_result_schema,
+)
+from .openrouter_analyzer import OpenRouterAnalyzer
+from .progress import ProgressEvent
+from .transcriber import AudioTranscriber, NoAudioTranscriber, OpenAITranscriber
 
-import subprocess
-import sys
-
-def check_ffmpeg():
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        return True
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print("FFmpeg is not installed. Please install FFmpeg before using this package.", file=sys.stderr)
-        print("Installation instructions can be found in the package README.", file=sys.stderr)
-        return False
-
-# Light check at import time; warn but don't raise to keep package importable
-try:
-    if not check_ffmpeg():
-        print("Warning: FFmpeg not found. Audio transcription may be unavailable.", file=sys.stderr)
-except Exception:
-    # Never fail import due to environment checks
-    pass
-
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
-    'VideoAnalyzer',
-    'OpenRouterAnalyzer',
-    'ModelConfig',
-    'Frame',
-    'AudioSegment',
-    'AnalysisPrompts',
-    'SceneType',
-    'FrameSelector',
-    'DynamicFrameSelector',
-    'UniformFrameSelector',
+    "ANALYSIS_RESULT_SCHEMA",
+    "AnalysisMetadata",
+    "AnalysisPrompts",
+    "AnalysisResult",
+    "AudioExtractionError",
+    "AudioSegment",
+    "AudioTranscriber",
+    "AuthenticationError",
+    "ConfigurationError",
+    "DynamicFrameSelector",
+    "Frame",
+    "FrameAnalysis",
+    "FrameSelector",
+    "MissingDependencyError",
+    "ModelCapabilityError",
+    "ModelConfig",
+    "ModelNotFoundError",
+    "ModelsUsed",
+    "NoAudioTranscriber",
+    "OpenAITranscriber",
+    "OpenRouterAnalyzer",
+    "OpenSceneSenseError",
+    "PerformanceMetadata",
+    "ProgressEvent",
+    "ProviderConnectionError",
+    "RateLimitError",
+    "ResponseValidationError",
+    "SceneType",
+    "SelectionMetadata",
+    "SelectionReason",
+    "SummaryResult",
+    "TimelineEvent",
+    "TranscriptionError",
+    "UniformFrameSelector",
+    "UsageMetadata",
+    "VideoAnalyzer",
+    "VideoLoadError",
+    "VideoMetadata",
+    "VideoMetadataError",
+    "analysis_result_schema",
+    "check_environment",
+    "check_ffmpeg",
 ]

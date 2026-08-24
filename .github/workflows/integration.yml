@@ -1,0 +1,42 @@
+name: live integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider to exercise
+        required: true
+        default: openai
+        type: choice
+        options:
+          - openai
+          - openrouter
+
+permissions:
+  contents: read
+
+jobs:
+  provider:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL }}
+      OPENAI_SUMMARY_MODEL: ${{ vars.OPENAI_SUMMARY_MODEL }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_VISION_MODEL: ${{ vars.OPENROUTER_VISION_MODEL }}
+      OPENROUTER_SUMMARY_MODEL: ${{ vars.OPENROUTER_SUMMARY_MODEL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install FFmpeg and package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Run bounded live integration
+        run: python scripts/live_integration.py ${{ inputs.provider }}

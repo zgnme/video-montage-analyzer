@@ -1,44 +1,50 @@
-from typing import Dict, Optional
-from openai import OpenAI
-from .analyzer import VideoAnalyzer
-from .models import ModelConfig, AnalysisPrompts
-from .frame_selectors import FrameSelector
+from __future__ import annotations
+
 import logging
 
+from openai import OpenAI
+
+from .analyzer import ProgressCallback, VideoAnalyzer
+from .frame_selectors import FrameSelector
+from .models import AnalysisPrompts, ModelConfig
+from .providers import OpenRouterProvider
+from .transcriber import AudioTranscriber, NoAudioTranscriber, OpenAITranscriber
+
+
 class OpenRouterAnalyzer(VideoAnalyzer):
-    """Video analyzer that uses OpenRouter for vision/text and OpenAI for audio"""
+    """Use OpenRouter for vision/summary and an independent transcriber for audio."""
 
     def __init__(
-            self,
-            openrouter_key: str,
-            openai_key: str,
-            model_config: Optional[ModelConfig] = None,
-            frame_selector: Optional[FrameSelector] = None,
-            min_frames: int = 8,
-            max_frames: int = 32,
-            frames_per_minute: float = 4.0,
-            prompts: Optional[AnalysisPrompts] = None,
-            log_level: int = logging.INFO,
-            http_referer: Optional[str] = None,
-            app_title: Optional[str] = None,
-            max_workers: int = 5,
-    ):
-        """
-        Initialize the OpenRouter video analyzer.
-
-        Args:
-            openrouter_key: OpenRouter API key for vision and text analysis
-            openai_key: OpenAI API key for audio transcription
-            model_config: Configuration specifying which models to use
-            min_frames: Minimum number of frames to analyze
-            max_frames: Maximum number of frames to analyze
-            frames_per_minute: Target number of frames to analyze per minute of video
-            prompts: Custom prompts for analysis
-            log_level: Logging level
-            http_referer: Your site URL for OpenRouter rankings
-            app_title: Your app name for OpenRouter rankings
-        """
-        # Initialize with OpenRouter client
+        self,
+        openrouter_key: str,
+        openai_key: str | None,
+        model_config: ModelConfig | None = None,
+        frame_selector: FrameSelector | None = None,
+        min_frames: int = 8,
+        max_frames: int = 32,
+        frames_per_minute: float = 4.0,
+        prompts: AnalysisPrompts | None = None,
+        log_level: int = logging.INFO,
+        http_referer: str | None = None,
+        app_title: str | None = None,
+        max_workers: int = 5,
+        *,
+        audio_transcriber: AudioTranscriber | None = None,
+        enable_audio: bool = True,
+        strict: bool = False,
+        max_frame_failure_ratio: float = 0.25,
+        on_progress: ProgressCallback | None = None,
+        max_image_dimension: int = 1280,
+        jpeg_quality: int = 85,
+        timeout: float = 120.0,
+        cache_dir: str | None = None,
+        resume: bool = False,
+    ) -> None:
+        headers = {}
+        if http_referer:
+            headers["HTTP-Referer"] = http_referer
+        if app_title:
+            headers["X-Title"] = app_title
         super().__init__(
             api_key=openrouter_key,
             base_url="https://openrouter.ai/api/v1",
@@ -50,38 +56,38 @@ class OpenRouterAnalyzer(VideoAnalyzer):
             prompts=prompts,
             log_level=log_level,
             max_workers=max_workers,
+            enable_audio=False,
+            api_mode="chat_completions",
+            strict=strict,
+            max_frame_failure_ratio=max_frame_failure_ratio,
+            on_progress=on_progress,
+            max_image_dimension=max_image_dimension,
+            jpeg_quality=jpeg_quality,
+            timeout=timeout,
+            default_headers=headers or None,
+            cache_dir=cache_dir,
+            resume=resume,
         )
-
-        # Create separate OpenAI client for audio
-        self.audio_client = OpenAI(api_key=openai_key)
-
-        # Set OpenRouter headers
-        if http_referer or app_title:
-            headers = {}
-            if http_referer:
-                headers["HTTP-Referer"] = http_referer
-            if app_title:
-                headers["X-Title"] = app_title
-            self.client.headers.update(headers)
-
-
-        self.logger.info(f"Initialized OpenRouterAnalyzer with:"
-                         f"\n - Frame selector: {self.frame_selector.__class__.__name__}"
-                         f"\n - Vision model: {self.model_config.vision_model}"
-                         f"\n - Text model: {self.model_config.text_model}"
-                         f"\n - Audio model: {self.model_config.audio_model} (via OpenAI)"
-                         )
+        self.provider = OpenRouterProvider(
+            self.client,
+            self.model_config.vision_model,
+            self.model_config.text_model,
+        )
+        self.enable_audio = bool(enable_audio)
+        self.audio_client: OpenAI | None = None
+        if audio_transcriber is not None:
+            self.audio_transcriber = audio_transcriber
+        elif self.enable_audio:
+            kwargs = {"timeout": timeout}
+            if openai_key:
+                kwargs["api_key"] = openai_key
+            self.audio_client = OpenAI(**kwargs)
+            self.audio_transcriber = OpenAITranscriber(
+                self.audio_client, model=self.model_config.audio_model
+            )
+        else:
+            self.audio_transcriber = NoAudioTranscriber()
 
     def _transcribe_audio(self, video_path: str):
-        """Override to use OpenAI client for audio transcription"""
-        # Store original client
-        original_client = self.client
-
-        try:
-            # Temporarily set client to audio_client
-            self.client = self.audio_client
-            # Call parent's implementation with audio client
-            return super()._transcribe_audio(video_path)
-        finally:
-            # Restore original client
-            self.client = original_client
+        """Compatibility hook retained from v1.1."""
+        return self.audio_transcriber.transcribe(video_path) if self.enable_audio else []

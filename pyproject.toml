@@ -4,31 +4,73 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openscenesense"
-version = "1.1.0"
+version = "1.2.0"
 authors = [
     { name = "Rohit Yelukati Mahendra", email = "mahendrarohittigon@gmail.com" },
 ]
-description = "A video analysis toolkit using OpenAI and Openrouter vision models"
+description = "Structured video analysis with OpenAI and OpenRouter vision models"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+keywords = ["video-analysis", "computer-vision", "openai", "openrouter", "multimodal"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "openai>=1.53.0",
-    "numpy>=2.0.2",
-    "opencv-python>=4.10.0",
-    "Pillow>=11.0.0",
-    "librosa>=0.10.2.post1",
-    "soundfile>=0.12.0",
-    "ffmpeg-python>=0.2.0"
+    "openai>=3.3.1,<4",
+    "numpy>=2.0.2,<3",
+    "opencv-python>=4.10.0,<6",
+    "Pillow>=11.0.0,<13",
+    "ffmpeg-python>=0.2.0,<0.3",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "jsonschema>=4.23,<5",
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+    "twine>=7,<8",
+]
+
+[project.scripts]
+openscenesense = "openscenesense.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openscenesense"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.coverage",
+    "/.env",
+    "/dist",
+    "/Examples/*.avi",
+    "/Examples/*.mp4",
+    "/Examples/*.wav",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
 [project.urls]
 Homepage = "https://github.com/ymrohit/openscenesense"
+Documentation = "https://github.com/ymrohit/openscenesense/tree/master/Docs"
+Changelog = "https://github.com/ymrohit/openscenesense/blob/master/CHANGELOG.md"
+Repository = "https://github.com/ymrohit/openscenesense.git"
 "Bug Tracker" = "https://github.com/ymrohit/openscenesense/issues"

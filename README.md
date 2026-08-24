@@ -1,336 +1,295 @@
-
-
 # OpenSceneSense
 
-**OpenSceneSense** is a cutting-edge Python package that revolutionizes video analysis by seamlessly integrating OpenAI and OpenRouter Vision models. Unlock the full potential of your videos with advanced frame analysis, audio transcription, dynamic frame selection, and comprehensive summaries all powered by state-of-the-art AI.
+Turn video into structured, timestamped scene intelligence without installing a local ML stack.
 
-## Table of Contents
+OpenSceneSense samples the most useful frames, transcribes optional audio, analyzes visual content with OpenAI or OpenRouter, and returns summaries, events, metadata, timing, and usage information. It is designed for applications, batch pipelines, dataset tooling, and anything that needs a dependable JSON result rather than a demo-only paragraph.
 
-1. [🚀 Why OpenSceneSense?](#-why-openscenesense)
-2. [🌟 Features](#-features)
-3. [📦 Installation](#-installation)
-4. [🔑 Setting Up API Keys](#-setting-up-api-keys)
-5. [🛠️ Usage](#-usage)
-6. [🎯 The Power of Prompts in OpenSceneSense](#-the-power-of-prompts-in-openscenesense)
-7. [📈 Applications](#-applications)
-8. [🚀 Future Upgrades: What's Next for OpenSceneSense?](#-future-upgrades-whats-next-for-openscenesense)
-9. [🌐 OpenSceneSense and the Future of Content Moderation](#-openscenesense-and-the-future-of-content-moderation)
-10. [🛠️ Contributing](#-contributing)
-11. [📄 License](#-license)
-12. [📬 Contact](#-contact)
-13. [📄 Additional Resources](Docs/prompts.md)
+> Looking for private, local inference? Use [OpenSceneSense Ollama](https://github.com/ymrohit/openscenesense-ollama). The two packages share the v1.2 result contract but intentionally do not share a dependency graph.
 
+## Why v1.2
 
-## 🚀 Why OpenSceneSense?
+- Modern OpenAI Responses API support with image input and strict JSON Schema output.
+- OpenRouter support through an explicit Chat Completions adapter.
+- One structured summary request produces the detailed summary, brief summary, and events.
+- Budget-bounded scene selection: scene density changes which frames win, never the configured cost ceiling.
+- Reduced-rate scene scanning on downscaled frames instead of analyzing every decoded frame.
+- JPEG preprocessing with a configurable size and quality ceiling.
+- Optional, replaceable audio transcription with no local audio-decoding stack.
+- Typed results, a checked-in JSON Schema, legacy dictionary compatibility, usage telemetry, progress events, strict mode, and resumable stage caches.
+- No import-time FFmpeg process, console output, or global logging configuration.
 
-OpenSceneSense isn't just another video analysis library, it's a gateway to a new era of video-based applications and innovations. By enabling large language models (LLMs) to process and understand video inputs, OpenSceneSense empowers developers, researchers, and creators to build intelligent video-centric solutions like never before.
+## Install
 
-### **Imagine the Possibilities:**
-
-- **Interactive Video Applications:** Create applications that can understand and respond to video content in real-time, enhancing user engagement and interactivity.
-- **Automated Video Content Generation:** Generate detailed narratives, summaries, or scripts based on video inputs, streamlining content creation workflows.
-- **Advanced Video-Based Datasets:** Build rich, annotated video datasets for training and benchmarking machine learning models, accelerating AI research.
-- **Enhanced Accessibility Tools:** Develop tools that provide detailed descriptions and summaries of video content, making media more accessible to all.
-- **Smart Surveillance Systems:** Implement intelligent surveillance solutions that can analyze and interpret video feeds, detecting anomalies and providing actionable insights.
-- **Educational Platforms:** Create interactive educational tools that can analyze instructional videos, generate quizzes, and provide detailed explanations.
-
-With OpenSceneSense, the boundaries of what's possible with video analysis are limitless. Transform your ideas into reality and lead the charge in the next wave of AI-driven video applications.
-
-## 🌟 Features
-
-- **📸 Frame Analysis:** Utilize advanced vision models to dissect visual elements, actions, and their interplay with audio.
-- **🎙️ Audio Transcription:** Seamlessly transcribe audio using Whisper models, enabling comprehensive multimedia understanding.
-- **🔄 Dynamic Frame Selection:** Automatically select the most relevant frames to ensure meaningful and efficient analysis.
-- **🔍 Scene Change Detection:** Identify scene transitions to enhance context awareness and narrative flow.
-- **📝 Comprehensive Summaries:** Generate cohesive and detailed summaries that integrate both visual and audio elements.
-- **🛠️ Customizable Prompts and Models:** Tailor the analysis process with custom prompts and model configurations to suit your specific needs.
-- **📊 Metadata Extraction:** Extract valuable metadata for deeper insights and data-driven applications.
-
-## 📦 Installation
-
-### **Prerequisites**
-
-- **Python 3.10+**
-- **FFmpeg** installed on your system
-
-### **Installing FFmpeg**
-
-#### On Ubuntu/Debian
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-#### On macOS (using Homebrew)
-```bash
-brew install ffmpeg
-```
-
-#### On Windows
-1. Download FFmpeg from [ffmpeg.org/download.html](https://ffmpeg.org/download.html).
-2. Extract the archive.
-3. Add the `bin` folder to your system PATH.
-
-To verify the installation, run:
-```bash
-ffmpeg -version
-```
-
-### **Install OpenSceneSense**
+OpenSceneSense supports Python 3.10+ and requires the FFmpeg and FFprobe executables.
 
 ```bash
 pip install openscenesense
 ```
 
-## 🔑 Setting Up API Keys
-
-OpenSceneSense requires API keys for OpenAI and/or OpenRouter to access the AI models. You can set them as environment variables:
+Install FFmpeg with your platform package manager:
 
 ```bash
-export OPENAI_API_KEY="your-openai-api-key"
-export OPENROUTER_API_KEY="your-openrouter-api-key"
+# Ubuntu/Debian
+sudo apt-get install ffmpeg
+
+# macOS
+brew install ffmpeg
 ```
 
-Alternatively, you can pass them directly when initializing the analyzer in your code.
+Verify the local requirement:
 
-## 🛠️ Usage
+```bash
+openscenesense check
+```
 
-### **Quick Start**
+The default package remains API-focused. It does not install Torch, Transformers, Ollama, librosa, or soundfile.
 
-Get up and running with OpenSceneSense in just a few lines of code. Analyze your first video and unlock rich insights effortlessly.
+## Python quick start
+
+Set `OPENAI_API_KEY`, then choose model IDs explicitly so deployments do not depend on changing aliases or README defaults:
 
 ```python
-import logging
-from openscenesense import ModelConfig, AnalysisPrompts, VideoAnalyzer, DynamicFrameSelector
+from openscenesense import ModelConfig, VideoAnalyzer
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# Defaults use `gpt-4o` (vision), `gpt-4o-mini` (text), and `whisper-1` (audio for segment-rich transcripts).
-# Override below if you want different models.
-# Set up custom models and prompts
-custom_models = ModelConfig(
-    vision_model="gpt-4o",           # Vision-capable model
-    text_model="gpt-4o-mini",        # Chat completion model
-    audio_model="whisper-1"          # Whisper model for audio transcription
-)
-
-custom_prompts = AnalysisPrompts(
-    frame_analysis="Analyze this frame focusing on visible elements, actions, and their relationship with any audio.",
-    detailed_summary="""Create a cohesive narrative that integrates both visual and audio elements into a single summary. 
-                        Duration: {duration:.1f} seconds\nTimeline:\n{timeline}\nAudio Transcript:\n{transcript}""",
-    brief_summary="""Provide a concise, easy-to-read summary combining the main visual and audio elements.
-                     Duration: {duration:.1f} seconds\nTimeline:\n{timeline}\nTranscript:\n{transcript}"""
-)
-
-# Initialize the video analyzer
 analyzer = VideoAnalyzer(
-    api_key="your-openai-api-key",
-    model_config=custom_models,
+    model_config=ModelConfig(
+        vision_model="gpt-5.6-luna",
+        text_model="gpt-5.6-luna",
+        audio_model="whisper-1",
+    ),
     min_frames=8,
     max_frames=32,
-    frame_selector=DynamicFrameSelector(),
-    frames_per_minute=8.0,
-    prompts=custom_prompts,
-    log_level=logging.INFO
+    frames_per_minute=4,
 )
 
-# Analyze the video
-video_path = "path/to/your/video.mp4"
-results = analyzer.analyze_video(video_path)
+result = analyzer.analyze_video_structured("video.mp4")
 
-# Print the results
-print("\nBrief Summary:")
-print(results['brief_summary'])
-
-print("\nDetailed Summary:")
-print(results['summary'])
-
-print("\nVideo Timeline:")
-print(results['timeline'])
-
-print("\nMetadata:")
-for key, value in results['metadata'].items():
-    print(f"{key}: {value}")
+print(result.summary.brief)
+for event in result.timeline:
+    print(event.start_time, event.description)
 ```
 
-### **Advanced Usage with OpenRouter Models**
-
-Leverage the power of OpenRouter models for enhanced performance and customization.
+`analyze_video_structured()` is the preferred v1.2 API. Existing code can continue using `analyze_video()`, which returns the v1.1 dictionary shape with additive metadata:
 
 ```python
-from openscenesense import ModelConfig, AnalysisPrompts, OpenRouterAnalyzer, DynamicFrameSelector
-from os import getenv
+legacy = analyzer.analyze_video("video.mp4")
+print(legacy["brief_summary"])
+print(legacy["frame_analyses"])
+```
 
-custom_models = ModelConfig(
-    vision_model="qwen/qwen2.5-vl-32b-instruct:free",
-    text_model="meta-llama/llama-3.2-3b-instruct:free",
-    audio_model="whisper-1"         
-)
+## CLI quick start
 
-custom_prompts = AnalysisPrompts(
-    frame_analysis="Analyze this frame focusing on visible elements, actions, and their relationship with any audio.",
-    detailed_summary="""Create a cohesive narrative that integrates both visual and audio elements into a single summary. 
-                        Duration: {duration:.1f} seconds\nTimeline:\n{timeline}\nAudio Transcript:\n{transcript}""",
-    brief_summary="""Provide a concise, easy-to-read summary combining the main visual and audio elements.
-                     Duration: {duration:.1f} seconds\nTimeline:\n{timeline}\nTranscript:\n{transcript}"""
-)
+API keys are read from environment variables and are never accepted as CLI arguments.
+
+```bash
+export OPENAI_API_KEY="..."
+
+openscenesense analyze video.mp4 \
+  --provider openai \
+  --vision-model gpt-5.6-luna \
+  --summary-model gpt-5.6-luna \
+  --structured-output \
+  --output result.json
+```
+
+Useful controls:
+
+```text
+--provider openai|openrouter
+--frame-selector dynamic|uniform
+--min-frames / --max-frames / --frames-per-minute
+--scene-change-threshold / --scene-scan-fps / --min-scene-gap
+--max-image-dimension / --jpeg-quality
+--no-audio
+--api-mode responses|chat_completions|auto
+--timeout / --max-workers
+--strict / --max-frame-failure-ratio
+--cache-dir / --resume / --force
+--structured-output
+```
+
+Print the result schema with:
+
+```bash
+openscenesense schema
+```
+
+## OpenRouter
+
+OpenRouter handles frame and summary inference; OpenAI audio transcription remains independent and can be disabled or replaced.
+
+```python
+import os
+
+from openscenesense import ModelConfig, OpenRouterAnalyzer
 
 analyzer = OpenRouterAnalyzer(
-    openrouter_key=getenv("OPENROUTER_API_KEY"),
-    openai_key=getenv("OPENAI_API_KEY"),
-    model_config=custom_models,
-    min_frames=8,
-    max_frames=32,
-    frame_selector=DynamicFrameSelector(),
-    frames_per_minute=8.0,
-    prompts=custom_prompts,
-    log_level=logging.INFO
+    openrouter_key=os.environ["OPENROUTER_API_KEY"],
+    openai_key=os.environ.get("OPENAI_API_KEY"),
+    model_config=ModelConfig(
+        vision_model="your-vision-capable-openrouter-model",
+        text_model="your-structured-output-model",
+        audio_model="whisper-1",
+    ),
+    enable_audio=False,
 )
 
-# Analyze the video
-video_path = "path/to/your/video.mp4"
-results = analyzer.analyze_video(video_path)
-
-# Print the results
-print("\nBrief Summary:")
-print(results['brief_summary'])
-
-print("\nDetailed Summary:")
-print(results['summary'])
-
-print("\nVideo Timeline:")
-print(results['timeline'])
-
-print("\nMetadata:")
-for key, value in results['metadata'].items():
-    print(f"{key}: {value}")
+result = analyzer.analyze_video_structured("video.mp4")
 ```
 
-## 🎯 The Power of Prompts in OpenSceneSense
+OpenAI defaults to the Responses API. OpenRouter defaults to Chat Completions. `api_mode="auto"` only falls back when an endpoint is genuinely unsupported; authentication, model, rate-limit, and malformed-response failures are never retried through a second endpoint.
 
-The quality and specificity of prompts play a crucial role in determining the effectiveness of the analysis OpenSceneSense provides. Thoughtfully crafted prompts can help guide the models to focus on the most important aspects of each frame, audio element, and overall video context, resulting in more accurate, relevant, and insightful outputs. OpenSceneSense allows you to define custom prompts for different types of analyses, giving you unparalleled control over the results.
+## Data boundary
 
-### **Why Prompts Matter**
+Metadata probing and frame selection happen locally. The package sends only the selected,
+size-bounded JPEG frames to the chosen vision provider; it does not upload the original video as
+one file. When built-in audio is enabled, a temporary mono WAV is sent to OpenAI transcription.
+The resulting frame descriptions and transcript are sent to the configured summary provider.
 
-- **Directing Focus**: Prompts help guide the model’s attention to specific elements, such as actions, emotions, or interactions within the video.
-- **Creating Coherent Summaries**: Well-defined prompts ensure that summaries are cohesive and natural, integrating both visual and audio information seamlessly.
-- **Contextualizing with Metadata**: By including tags like `{timeline}`, `{duration}`, and `{transcript}`, prompts can encourage the model to generate outputs that are contextually aware, helping users understand the full scope of the video’s content.
+Disable audio or supply your own transcriber when that boundary is too broad. Provider retention
+and training policies remain the provider's responsibility, so review them for sensitive
+workloads. Opt-in caches stay on the machine running OpenSceneSense.
 
-### **Example Prompts for Enhanced Analysis**
+## Structured result contract
 
-Here are some example prompts to inspire you and help you maximize the capabilities of OpenSceneSense:
+Both OpenSceneSense distributions emit schema version `1.2`:
 
-1. **Frame-Level Analysis Prompt**  
-   ```plaintext
-   "Analyze this frame with a focus on visible objects, their movements, and any emotions they convey. Consider the context of prior and subsequent frames for continuity."
-   ```
-   *Use this prompt to capture detailed visual elements and their implications.*
+```text
+AnalysisResult
+├── schema_version
+├── summary
+│   ├── detailed
+│   └── brief
+├── timeline[]
+├── frame_analyses[]
+├── audio_segments[]
+├── metadata
+│   ├── video
+│   ├── selection
+│   ├── models
+│   ├── performance
+│   └── usage
+├── warnings[]
+└── errors[]
+```
 
-2. **Detailed Summary Prompt**  
-   ```plaintext
-   "*DO NOT SEPARATE AUDIO AND VIDEO SPECIFICALLY* Create a cohesive narrative that combines visual and audio elements naturally. Use context from the {duration:.1f}-second video with reference to the timeline:\n{timeline}\n\nAudio Transcript:\n{transcript}."
-   ```
-   *This prompt encourages the model to generate a unified story that reflects both the audio and visual content without separation.*
+The source schema is [Docs/analysis_result.schema.json](Docs/analysis_result.schema.json). Regenerate it after contract changes:
 
-3. **Brief Summary Prompt**  
-   ```plaintext
-   "Provide a concise summary that combines key visual and audio elements. Base your answer on the {duration:.1f}-second video, using insights from the timeline:\n{timeline}\n\n{transcript}. This should be easy to read and provide the complete context."
-   ```
-   *Ideal for quickly understanding the main points of the video.*
+```bash
+python scripts/export_schema.py
+```
 
-4. **Emotion and Tone Analysis Prompt**  
-   ```plaintext
-   "Analyze the visual and audio tone of this video, noting any emotional shifts or significant interactions. Reference the timeline:\n{timeline} and audio transcript:\n{transcript} for a nuanced interpretation."
-   ```
-   *This prompt works well for assessing emotional tone or sentiment, especially in videos with spoken dialogue or expressive visuals.*
+## Frame selection
 
-### **Using `{timeline}`, `{duration}`, and `{transcript}` Tags**
+`DynamicFrameSelector` builds one predictable frame budget:
 
-Including these tags in your prompts helps provide essential context to the models, resulting in richer, more accurate analyses:
+```python
+from openscenesense import DynamicFrameSelector, VideoAnalyzer
 
-- **`{timeline}`**: This tag allows the model to refer to specific points within the video, giving it the ability to track the progression of events and identify key moments.
-- **`{duration}`**: By knowing the total duration, the model can gauge the significance of each scene and avoid overemphasizing minor moments.
-- **`{transcript}`**: The audio transcript tag helps the model integrate spoken content into its interpretation, ensuring that the summary and analysis reflect both visual and audio insights.
+selector = DynamicFrameSelector(
+    scene_change_threshold=0.18,
+    scene_scan_fps=2.0,
+    min_scene_gap=0.75,
+)
 
-### **Best Practices for Crafting Prompts**
+analyzer = VideoAnalyzer(
+    frame_selector=selector,
+    min_frames=8,
+    max_frames=32,
+    frames_per_minute=4,
+)
+```
 
-- **Be Specific and Clear**: A focused prompt yields focused results. Specify whether the model should analyze actions, emotions, or the relationship between visuals and audio.
-- **Use Descriptive Language**: The more descriptive your prompt, the better the model can interpret and analyze the content.
-- **Integrate Tags for Full Context**: Use `{timeline}`, `{duration}`, and `{transcript}` in your prompts to enhance the model’s awareness of the video’s structure and narrative flow.
+The opening and closing frames are retained, strong scene-change peaks receive up to 60% of the remaining budget, and unused positions fill the largest temporal gaps. Selected frames record `selection_reason` and a normalized `difference_score`.
 
-### **How Prompts and Tags Elevate OpenSceneSense**
+Use `UniformFrameSelector` when deterministic spacing is more important than scene changes.
 
-By leveraging powerful prompts and contextual tags, OpenSceneSense can provide insights that feel human-like in their depth and coherence. These tailored prompts allow the model to interpret complex video content in a way that is both holistic and precise, setting OpenSceneSense apart as a tool for serious video analysis and understanding.
+## Audio is replaceable
 
-With prompt-driven analysis, OpenSceneSense can become your intelligent partner in interpreting video content, whether for content moderation, dataset creation, or building interactive applications that respond to visual and audio cues naturally.
+Disable audio without changing the visual pipeline:
 
-For a comprehensive list of innovative video analysis prompts, refer to the [Prompt Examples](Docs/prompts.md).
-Note: By default, OpenSceneSense uses OpenAI's modern Responses API when available and
-falls back to Chat Completions automatically for compatibility (including OpenRouter).
+```python
+analyzer = VideoAnalyzer(enable_audio=False)
+```
 
-## 📈 Applications
+Or provide an object with `transcribe(video_path) -> list[AudioSegment]`:
 
-OpenSceneSense is not just a tool—it's a foundation for building innovative video-centric solutions across various domains:
+```python
+import os
 
-- **Media and Entertainment:** Automate content tagging, generate detailed video descriptions, and enhance searchability.
-- **Education:** Develop intelligent tutoring systems that can analyze instructional videos and provide tailored feedback.
-- **Healthcare:** Analyze medical procedure videos to assist in training and quality control.
-- **Marketing:** Generate insightful video summaries and analytics to drive data-driven marketing strategies.
-- **Research:** Create annotated video datasets for machine learning research, enabling advancements in computer vision and multimedia understanding.
+from openscenesense import AudioSegment, VideoAnalyzer
 
-## 🚀 Future Upgrades: What's Next for OpenSceneSense?
 
-### **Top 5 Potential Future Upgrades**
+class ExistingTranscript:
+    def transcribe(self, video_path):
+        return [AudioSegment("Already transcribed", 0.0, 2.0, 1.0)]
 
-1. **Real-Time Video Analysis**  
-   Enabling real-time processing to analyze live video feeds with minimal latency. This would open doors to real-time content moderation, live video indexing, and intelligent surveillance systems that can act instantly based on video content.
 
-2. **Multi-Language Audio and Text Support**  
-   Expanding Whisper’s capabilities to transcribe and analyze videos in multiple languages, allowing OpenSceneSense to support a global user base and cater to diverse video content from around the world.
+analyzer = VideoAnalyzer(
+    audio_transcriber=ExistingTranscript(),
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+```
 
-3. **Enhanced Metadata Extraction with Key Phrase Tagging**  
-   Enabling automated tagging of key visual and audio elements as searchable metadata, which would improve video indexing and searchability, helping users find relevant content faster and more effectively.
+The built-in OpenAI transcriber extracts a temporary mono 16 kHz WAV through FFmpeg. Extraction failures become warnings in normal mode and exceptions in strict mode.
 
----
+## Reliability controls
 
-## 🌐 OpenSceneSense and the Future of Content Moderation
+```python
+def progress(event):
+    print(event.stage, event.current, event.total, event.message)
 
-With video content dominating the internet, content moderation is more crucial than ever. OpenSceneSense’s capabilities make it a groundbreaking tool for moderating content in an accurate, and context-aware way.
 
-### **How OpenSceneSense Transforms Content Moderation**
+analyzer = VideoAnalyzer(
+    strict=False,
+    max_frame_failure_ratio=0.25,
+    on_progress=progress,
+    timeout=120,
+    max_workers=5,
+)
+```
 
-- **Context-Aware Analysis:** Unlike traditional moderation methods that rely on keyword detection or basic image recognition, OpenSceneSense understands the full context by integrating both video and audio data. This enables it to distinguish between harmful and benign content with greater accuracy, reducing false positives.
+Authentication, missing-model, and rate-limit failures stop immediately. In normal mode, isolated frame, transcription, or summary-validation failures are returned as warnings with deterministic fallbacks. `strict=True` converts partial failures into exceptions.
 
-- **Real-Time Moderation for Live Streams:** With future support for real-time analysis, OpenSceneSense could monitor live streams and flag inappropriate content immediately. This is essential for platforms hosting user-generated content where harmful material can spread quickly.
+## Cache and resume
 
-- **Automated Reporting and Summarization:** By generating detailed summaries and metadata, OpenSceneSense can quickly provide moderators with concise reports of flagged content, saving time and improving decision-making processes.
+Caching is opt-in because results can contain sensitive descriptions and transcripts.
 
-- **Cross-Cultural Sensitivity:** OpenSceneSense’s future multi-language and emotion recognition capabilities will allow it to identify culturally specific cues and context, making it a valuable tool for international platforms that need to moderate content with global sensibilities.
+```python
+analyzer = VideoAnalyzer(
+    cache_dir=".openscenesense-cache",
+    resume=True,
+)
+```
 
-- **Safer Social Media and Video Platforms:** By empowering platforms with intelligent, context-aware moderation, OpenSceneSense will help create a safer online environment for users while reducing the burden on human moderators.
+The key incorporates the video edge hash, size, modification nanoseconds, provider, models, prompts, selection settings, preprocessing settings, and transcription configuration. Manifests, metadata, transcripts, frame analyses, and final results are written atomically in separate stages.
 
-### **The Bottom Line**
+## Development
 
-As OpenSceneSense continues to evolve, its impact on content moderation will be transformative. It offers a way to analyze video content more holistically and sensitively than ever before, empowering platforms to ensure safer, more inclusive spaces for users worldwide.
+```bash
+git clone https://github.com/ymrohit/openscenesense.git
+cd openscenesense
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+ruff check openscenesense tests scripts benchmarks Examples
+python -m build
+```
 
-## 🛠️ Contributing
+CI tests minimum-supported and latest-compatible dependencies across supported Python versions.
+The bounded live integration under `scripts/` runs only through manual dispatch with provider
+credentials.
 
-I welcome contributions from the community! Whether it's reporting bugs, suggesting features, or submitting pull requests, your input helps make OpenSceneSense better for everyone.
+More detail:
 
-1. Fork the repository.
-2. Create a new branch: `git checkout -b feature/YourFeature`.
-3. Commit your changes: `git commit -m "Add YourFeature"`.
-4. Push to the branch: `git push origin feature/YourFeature`.
-5. Open a pull request.
+- [Result schema](Docs/result-schema.md)
+- [Frame selection](Docs/frame-selection.md)
+- [Transcription](Docs/transcription.md)
+- [Performance](Docs/performance.md)
+- [Troubleshooting](Docs/troubleshooting.md)
+- [v1.2 migration](Docs/v1.2-migration.md)
 
-## 📄 License
+## License and support
 
-Distributed under the MIT License. See `LICENSE` for more information.
-
-## 📬 Contact
-
-For questions, suggestions, or support, feel free to reach out:
-
-- **Email:** mahendrarohittigon@gmail.com
-- **GitHub Issues:** [OpenSceneSense Issues](https://github.com/ymrohit/openscenesense/issues)
+OpenSceneSense is released under the MIT License. Report bugs and request features through [GitHub Issues](https://github.com/ymrohit/openscenesense/issues).

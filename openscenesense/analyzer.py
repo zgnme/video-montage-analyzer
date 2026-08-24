@@ -1,617 +1,605 @@
-from typing import Dict, Optional, List
-import logging
-from openai import OpenAI
-from .models import ModelConfig, AnalysisPrompts, AudioSegment, Frame, SceneType
-from .frame_selectors import FrameSelector, DynamicFrameSelector
-import cv2
-import numpy as np
-from PIL import Image
-import io
+from __future__ import annotations
+
 import base64
-import librosa
-import tempfile
+import io
+import logging
 import os
-import soundfile as sf
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import ffmpeg
+from dataclasses import asdict
+from typing import Literal
 
+from openai import OpenAI
+from PIL import Image
 
-class VideoAnalyzerError(Exception):
-    """Base exception class for VideoAnalyzer."""
-    pass
+from .cache import AnalysisCache, analysis_cache_key
+from .exceptions import (
+    AudioTranscriptionError,
+    AuthenticationError,
+    ConfigurationError,
+    FrameAnalysisError,
+    ModelNotFoundError,
+    OpenSceneSenseError,
+    RateLimitError,
+    ResponseValidationError,
+    VideoAnalysisError,
+    VideoAnalyzerError,
+    VideoLoadError,
+)
+from .frame_selectors import DynamicFrameSelector, FrameSelector
+from .models import (
+    AnalysisMetadata,
+    AnalysisPrompts,
+    AnalysisResult,
+    AudioSegment,
+    Frame,
+    FrameAnalysis,
+    ModelConfig,
+    ModelsUsed,
+    PerformanceMetadata,
+    SceneType,
+    SelectionMetadata,
+    SummaryResult,
+    TimelineEvent,
+    UsageMetadata,
+)
+from .progress import ProgressEvent
+from .providers import OpenAIProvider, ProviderAdapter
+from .providers.base import merge_usage
+from .transcriber import AudioTranscriber, NoAudioTranscriber, OpenAITranscriber
+from .video_utils import probe_video
 
-
-class VideoAnalysisError(VideoAnalyzerError):
-    """Exception raised for errors during video analysis."""
-    pass
-
-
-class AudioTranscriptionError(VideoAnalyzerError):
-    """Exception raised for errors during audio transcription."""
-    pass
-
-
-class FrameAnalysisError(VideoAnalyzerError):
-    """Exception raised for errors during frame analysis."""
-    pass
+ProgressCallback = Callable[[ProgressEvent], None]
 
 
 class VideoAnalyzer:
     def __init__(
-            self,
-            api_key: Optional[str] = None,
-            model_config: Optional[ModelConfig] = None,
-            frame_selector: Optional[FrameSelector] = None,
-            min_frames: int = 8,
-            max_frames: int = 32,
-            frames_per_minute: float = 4.0,
-            prompts: Optional[AnalysisPrompts] = None,
-            log_level: int = logging.INFO,
-            base_url: Optional[str] = None,
-            organization: Optional[str] = None,
-            max_workers: int = 5,
-    ):
-        """
-        Initialize the VideoAnalyzer with configurable models and parameters.
-
-        Args:
-            api_key: OpenAI API key.
-            model_config: Configuration specifying which OpenAI models to use.
-            frame_selector: Strategy for selecting frames from the video.
-            min_frames: Minimum number of frames to analyze.
-            max_frames: Maximum number of frames to analyze.
-            frames_per_minute: Target number of frames to analyze per minute of video.
-            prompts: Custom prompts for analysis.
-            log_level: Logging level.
-            base_url: Base URL for the OpenAI API.
-            organization: OpenAI organization ID.
-        """
-        self._configure_logging(log_level)
+        self,
+        api_key: str | None = None,
+        model_config: ModelConfig | None = None,
+        frame_selector: FrameSelector | None = None,
+        min_frames: int = 8,
+        max_frames: int = 32,
+        frames_per_minute: float = 4.0,
+        prompts: AnalysisPrompts | None = None,
+        log_level: int = logging.INFO,
+        base_url: str | None = None,
+        organization: str | None = None,
+        max_workers: int = 5,
+        *,
+        audio_transcriber: AudioTranscriber | None = None,
+        enable_audio: bool = True,
+        api_mode: Literal["responses", "chat_completions", "auto"] = "responses",
+        strict: bool = False,
+        max_frame_failure_ratio: float = 0.25,
+        on_progress: ProgressCallback | None = None,
+        max_image_dimension: int = 1280,
+        jpeg_quality: int = 85,
+        timeout: float = 120.0,
+        default_headers: dict[str, str] | None = None,
+        cache_dir: str | None = None,
+        resume: bool = False,
+    ) -> None:
         self.logger = logging.getLogger(__name__)
-
+        self.logger.setLevel(log_level)
         self._validate_initialization_parameters(
-            api_key, model_config, frame_selector,
-            min_frames, max_frames, frames_per_minute
+            min_frames,
+            max_frames,
+            frames_per_minute,
+            max_workers,
+            max_frame_failure_ratio,
+            max_image_dimension,
+            jpeg_quality,
+            timeout,
         )
-
-        self.client = self._initialize_openai_client(api_key, base_url, organization)
-
         self.model_config = model_config or ModelConfig()
         self.frame_selector = frame_selector or DynamicFrameSelector(logger=self.logger)
         self.min_frames = min_frames
         self.max_frames = max_frames
         self.frames_per_minute = frames_per_minute
         self.prompts = prompts or AnalysisPrompts()
-        self.max_workers = max(1, int(max_workers))
+        self.max_workers = max_workers
+        self.strict = strict
+        self.max_frame_failure_ratio = max_frame_failure_ratio
+        self.on_progress = on_progress
+        self.max_image_dimension = max_image_dimension
+        self.jpeg_quality = jpeg_quality
+        self.cache_dir = cache_dir
+        self.resume = resume
+        self.client = self._initialize_openai_client(
+            api_key, base_url, organization, timeout, default_headers
+        )
+        self.provider: ProviderAdapter = OpenAIProvider(
+            self.client,
+            self.model_config.vision_model,
+            self.model_config.text_model,
+            api_mode=api_mode,
+        )
+        self.enable_audio = bool(enable_audio)
+        if audio_transcriber is not None:
+            self.audio_transcriber: AudioTranscriber = audio_transcriber
+        elif self.enable_audio:
+            self.audio_transcriber = OpenAITranscriber(
+                self.client, model=self.model_config.audio_model
+            )
+        else:
+            self.audio_transcriber = NoAudioTranscriber()
+        self._usage = UsageMetadata()
+        self._usage_lock = threading.Lock()
 
-        self.logger.info(f"Initialized VideoAnalyzer with:"
-                         f"\n - Frame selector: {self.frame_selector.__class__.__name__}"
-                         f"\n - Vision model: {self.model_config.vision_model}"
-                         f"\n - Text model: {self.model_config.text_model}"
-                         f"\n - Audio model: {self.model_config.audio_model}")
-
-    def _configure_logging(self, log_level: int) -> None:
-        """Configure logging settings."""
-        logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
-
+    @staticmethod
     def _validate_initialization_parameters(
-            self,
-            api_key: Optional[str],
-            model_config: Optional[ModelConfig],
-            frame_selector: Optional[FrameSelector],
-            min_frames: int,
-            max_frames: int,
-            frames_per_minute: float
+        min_frames: int,
+        max_frames: int,
+        frames_per_minute: float,
+        max_workers: int,
+        max_frame_failure_ratio: float,
+        max_image_dimension: int,
+        jpeg_quality: int,
+        timeout: float,
     ) -> None:
-        """Validate initialization parameters."""
         if min_frames < 1:
-            raise ValueError("min_frames must be at least 1.")
+            raise ConfigurationError("min_frames must be at least 1.")
         if max_frames < min_frames:
-            raise ValueError("max_frames must be greater than or equal to min_frames.")
+            raise ConfigurationError("max_frames must be greater than or equal to min_frames.")
         if frames_per_minute <= 0:
-            raise ValueError("frames_per_minute must be a positive number.")
+            raise ConfigurationError("frames_per_minute must be positive.")
+        if max_workers < 1:
+            raise ConfigurationError("max_workers must be at least 1.")
+        if not 0 <= max_frame_failure_ratio <= 1:
+            raise ConfigurationError("max_frame_failure_ratio must be between 0 and 1.")
+        if max_image_dimension < 64:
+            raise ConfigurationError("max_image_dimension must be at least 64.")
+        if not 1 <= jpeg_quality <= 100:
+            raise ConfigurationError("jpeg_quality must be between 1 and 100.")
+        if timeout <= 0:
+            raise ConfigurationError("timeout must be positive.")
 
-    def _initialize_openai_client(self, api_key: Optional[str], base_url: Optional[str],
-                                  organization: Optional[str]) -> OpenAI:
-        """Initialize the OpenAI client with provided credentials."""
-        client_kwargs = {}
+    def _initialize_openai_client(
+        self,
+        api_key: str | None,
+        base_url: str | None,
+        organization: str | None,
+        timeout: float,
+        default_headers: dict[str, str] | None,
+    ) -> OpenAI:
+        kwargs: dict[str, object] = {"timeout": timeout}
         if api_key:
-            client_kwargs['api_key'] = api_key
+            kwargs["api_key"] = api_key
         if base_url:
-            client_kwargs['base_url'] = base_url
+            kwargs["base_url"] = base_url
         if organization:
-            client_kwargs['organization'] = organization
-
+            kwargs["organization"] = organization
+        if default_headers:
+            kwargs["default_headers"] = default_headers
         try:
-            client = OpenAI(**client_kwargs)
-            # Track if using OpenRouter, which may not support Responses API
-            self._is_openrouter = bool(base_url and "openrouter.ai" in str(base_url))
-            self.logger.debug("OpenAI client initialized successfully.")
-            return client
-        except Exception as e:
-            self.logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-            raise VideoAnalyzerError("OpenAI client initialization failed.") from e
+            return OpenAI(**kwargs)
+        except Exception as exc:
+            raise ConfigurationError(f"OpenAI client initialization failed: {exc}") from exc
 
-    def _frame_to_base64(self, frame: np.ndarray) -> str:
-        """Convert a frame to a base64-encoded JPEG string."""
+    def _emit(
+        self,
+        stage: str,
+        current: int = 0,
+        total: int = 0,
+        message: str = "",
+        **details: object,
+    ) -> None:
+        if not self.on_progress:
+            return
+        try:
+            self.on_progress(ProgressEvent(stage, current, total, message, dict(details)))
+        except Exception as exc:
+            self.logger.warning("Progress callback failed: %s", exc)
+
+    def _record_usage(self, usage: UsageMetadata) -> None:
+        with self._usage_lock:
+            merge_usage(self._usage, usage)
+
+    def _frame_to_base64(self, frame: object) -> str:
         try:
             image = Image.fromarray(frame)
-            buffered = io.BytesIO()
-            image.save(buffered, format="JPEG")
-            base64_image = base64.b64encode(buffered.getvalue()).decode()
-            self.logger.debug("Frame converted to base64 successfully.")
-            return base64_image
-        except Exception as e:
-            self.logger.error(f"Failed to convert frame to base64: {str(e)}")
-            raise FrameAnalysisError("Frame conversion to base64 failed.") from e
-
-    def _detect_scene_changes(self, cap: cv2.VideoCapture, threshold: float = 20.0) -> List[float]:
-        """
-        Detect significant scene changes in the video.
-
-        Args:
-            cap: OpenCV VideoCapture object.
-            threshold: Difference threshold to consider a scene change.
-
-        Returns:
-            List of timestamps (in seconds) where scene changes occur.
-        """
-        scene_changes = []
-        prev_frame = None
-
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                if prev_frame is not None:
-                    # Calculate frame difference
-                    gray1 = cv2.cvtColor(prev_frame, cv2.COLOR_RGB2GRAY)
-                    gray2 = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
-                    diff = cv2.absdiff(gray1, gray2)
-                    diff_score = np.mean(diff)
-
-                    if diff_score > threshold:
-                        timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                        scene_changes.append(timestamp)
-                        self.logger.debug(f"Scene change detected at {timestamp:.2f}s with diff score {diff_score:.2f}")
-
-                prev_frame = frame_rgb
-
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self.logger.info(f"Detected {len(scene_changes)} scene changes.")
-            return scene_changes
-
-        except Exception as e:
-            self.logger.error(f"Scene change detection failed: {str(e)}")
-            raise VideoAnalysisError("Scene change detection failed.") from e
-
-    def _extract_audio_wav(self, video_path: str) -> Optional[str]:
-        """Extract audio to a 16kHz mono WAV file using ffmpeg.
-
-        Returns the temp file path on success, or None if extraction fails.
-        """
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                temp_path = tmp.name
-            (
-                ffmpeg
-                .input(video_path)
-                .output(temp_path, ac=1, ar=16000, format='wav', vn=None)
-                .overwrite_output()
-                .run(quiet=True)
+            image.thumbnail(
+                (self.max_image_dimension, self.max_image_dimension),
+                Image.Resampling.LANCZOS,
             )
-            return temp_path
-        except Exception as e:
-            self.logger.debug(f"ffmpeg extraction failed (will fall back to librosa): {e}")
-            try:
-                if 'temp_path' in locals() and os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except Exception:
-                pass
-            return None
+            output = io.BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=self.jpeg_quality,
+                optimize=True,
+            )
+            return base64.b64encode(output.getvalue()).decode("ascii")
+        except Exception as exc:
+            raise ResponseValidationError(f"Frame preprocessing failed: {exc}") from exc
 
-    def _has_audio_stream(self, video_path: str) -> bool:
-        """Detect if the video contains an audio stream using ffprobe.
-
-        Returns True if at least one audio stream exists; if probing fails,
-        returns True (best-effort to not block transcription attempts).
-        """
+    def _analyze_frame(self, frame: Frame) -> FrameAnalysis:
+        if frame.image is None:
+            return FrameAnalysis(
+                timestamp=frame.timestamp,
+                description="Error analyzing frame",
+                scene_type=frame.scene_type.value,
+                selection_reason=frame.selection_reason,
+                difference_score=frame.difference_score,
+                error="Frame image data is missing.",
+            )
         try:
-            info = ffmpeg.probe(video_path)
-            streams = info.get('streams', [])
-            return any(s.get('codec_type') == 'audio' for s in streams)
-        except Exception as e:
-            self.logger.debug(f"ffprobe failed to inspect audio streams: {e}")
-            return True
-
-    def _transcribe_audio(self, video_path: str) -> List[AudioSegment]:
-        """
-        Transcribe audio from video using the selected Whisper model.
-
-        Args:
-            video_path: Path to the video file.
-
-        Returns:
-            List of transcribed audio segments.
-        """
-        try:
-            # Short-circuit if no audio present
-            if not self._has_audio_stream(video_path):
-                self.logger.info("No audio stream detected; skipping transcription.")
-                return []
-
-            self.logger.info("Extracting audio from video...")
-            temp_path = self._extract_audio_wav(video_path)
-
-            # Fallback to librosa if ffmpeg extraction fails
-            if temp_path is None:
-                audio_array, sr = librosa.load(video_path, sr=16000)
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                    temp_path = temp_audio.name
-                    self.logger.debug(f"Saving temporary audio file to {temp_path} (librosa fallback)")
-                    sf.write(temp_path, audio_array, sr, format='WAV')
-
-            try:
-                self.logger.info("Transcribing audio via speech-to-text API...")
-                # Choose response format based on model capabilities
-                model_lc = (self.model_config.audio_model or "").lower()
-                # Whisper supports 'verbose_json' with segments; newer models typically support 'json' or 'text'
-                resp_format = "verbose_json" if "whisper" in model_lc else "json"
-                with open(temp_path, 'rb') as audio_file:
-                    response = self.client.audio.transcriptions.create(
-                        model=self.model_config.audio_model,
-                        file=audio_file,
-                        response_format=resp_format
-                    )
-
-                segments: List[AudioSegment] = []
-                if hasattr(response, 'segments') and response.segments:
-                    for segment in response.segments:
-                        segments.append(AudioSegment(
-                            text=getattr(segment, 'text', ''),
-                            start_time=getattr(segment, 'start', 0.0),
-                            end_time=getattr(segment, 'end', 0.0),
-                            confidence=getattr(segment, 'confidence', 1.0)
-                        ))
-                else:
-                    # For non-verbose formats, extract overall text
-                    text_value = getattr(response, 'text', None)
-                    if not text_value and hasattr(response, 'output_text'):
-                        text_value = response.output_text
-                    segments.append(AudioSegment(
-                        text=text_value or str(response),
-                        start_time=0.0,
-                        end_time=0.0,
-                        confidence=1.0
-                    ))
-
-                self.logger.info(f"Successfully transcribed {len(segments)} audio segments.")
-                return segments
-
-            except Exception as e:
-                self.logger.error(f"Audio transcription failed: {str(e)}")
-                return []
-
-            finally:
-                try:
-                    if temp_path and os.path.exists(temp_path):
-                        os.unlink(temp_path)
-                        self.logger.debug("Temporary audio file deleted successfully.")
-                except Exception as e:
-                    self.logger.warning(f"Failed to delete temporary audio file: {str(e)}")
-
-        except Exception as e:
-            self.logger.error(f"Audio extraction failed: {str(e)}")
-            return []
-
-    def _analyze_frame(self, frame: Frame) -> Dict:
-        """
-        Analyze a single frame using the selected vision model.
-
-        Args:
-            frame: Frame object containing image data and metadata.
-
-        Returns:
-            Dictionary containing analysis results.
-        """
-        try:
-            if frame.image is None:
-                raise ValueError("Frame image data is missing.")
-
-            base64_image = self._frame_to_base64(frame.image)
-
-            description = None
-            if getattr(self, "_is_openrouter", False):
-                # OpenRouter: stick to chat.completions endpoint
-                response = self.client.chat.completions.create(
-                    model=self.model_config.vision_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": self.prompts.frame_analysis},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                                }
-                            ]
-                        }
-                    ],
-                    max_tokens=300
-                )
-                if not response or not response.choices:
-                    raise FrameAnalysisError("Received empty response or choices from API.")
-                description = response.choices[0].message.content
-            else:
-                # Prefer modern Responses API (OpenAI)
-                try:
-                    response = self.client.responses.create(
-                        model=self.model_config.vision_model,
-                        input=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": self.prompts.frame_analysis},
-                                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{base64_image}"}
-                            ]
-                        }]
-                    )
-                    description = getattr(response, 'output_text', None)
-                except Exception as e:
-                    self.logger.debug(f"Responses API failed for vision; falling back to chat.completions: {e}")
-                    response = self.client.chat.completions.create(
-                        model=self.model_config.vision_model,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": self.prompts.frame_analysis},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                                ]
-                            }
-                        ],
-                        max_tokens=300
-                    )
-                    if not response or not response.choices:
-                        raise FrameAnalysisError("Received empty response or choices from API.")
-                    description = response.choices[0].message.content
-            if not description:
-                raise FrameAnalysisError("No content found in response message.")
-
-            self.logger.debug(f"Frame at {frame.timestamp:.2f}s analyzed successfully.")
-            return {
-                "timestamp": frame.timestamp,
-                "description": description,
-                "scene_type": frame.scene_type.value
-            }
-
-        except Exception as e:
-            self.logger.error(f"Frame analysis failed: {str(e)}")
-            return {
-                "timestamp": frame.timestamp,
-                "description": "Error analyzing frame",
-                "scene_type": frame.scene_type.value
-            }
-
-    def _generate_summary(self, frame_descriptions: List[Dict], audio_segments: List[AudioSegment],
-                          video_duration: float) -> Dict:
-        """
-        Generate video summaries using the selected text model.
-
-        Args:
-            frame_descriptions: List of frame analysis results.
-            audio_segments: List of transcribed audio segments.
-            video_duration: Total duration of the video in seconds.
-
-        Returns:
-            Dictionary containing detailed and brief summaries, timeline, and transcript.
-        """
-        timeline = "\n".join(
-            f"Time {desc['timestamp']:.2f}s ({desc['scene_type']}): {desc['description']}"
-            for desc in frame_descriptions
-        )
-
-        transcript = "\n".join(
-            f"[{seg.start_time:.1f}s - {seg.end_time:.1f}s]: {seg.text}"
-            for seg in audio_segments
-        ) if audio_segments else "No audio transcript available."
-
-        try:
-            if getattr(self, "_is_openrouter", False):
-                detailed_response = self.client.chat.completions.create(
-                    model=self.model_config.text_model,
-                    messages=[{
-                        "role": "user",
-                        "content": self.prompts.detailed_summary.format(
-                            duration=video_duration,
-                            timeline=timeline,
-                            transcript=transcript
-                        )
-                    }]
-                )
-                brief_response = self.client.chat.completions.create(
-                    model=self.model_config.text_model,
-                    messages=[{
-                        "role": "user",
-                        "content": self.prompts.brief_summary.format(
-                            duration=video_duration,
-                            timeline=timeline,
-                            transcript=transcript
-                        )
-                    }]
-                )
-                detailed_text = detailed_response.choices[0].message.content
-                brief_text = brief_response.choices[0].message.content
-            else:
-                detailed_resp = self.client.responses.create(
-                    model=self.model_config.text_model,
-                    input=self.prompts.detailed_summary.format(
-                        duration=video_duration,
-                        timeline=timeline,
-                        transcript=transcript
-                    )
-                )
-                brief_resp = self.client.responses.create(
-                    model=self.model_config.text_model,
-                    input=self.prompts.brief_summary.format(
-                        duration=video_duration,
-                        timeline=timeline,
-                        transcript=transcript
-                    )
-                )
-                detailed_text = getattr(detailed_resp, 'output_text', None) or ""
-                brief_text = getattr(brief_resp, 'output_text', None) or ""
-                if not detailed_text or not brief_text:
-                    self.logger.debug("Responses output missing; falling back to chat.completions.")
-                    detailed_response = self.client.chat.completions.create(
-                        model=self.model_config.text_model,
-                        messages=[{
-                            "role": "user",
-                            "content": self.prompts.detailed_summary.format(
-                                duration=video_duration,
-                                timeline=timeline,
-                                transcript=transcript
-                            )
-                        }]
-                    )
-                    brief_response = self.client.chat.completions.create(
-                        model=self.model_config.text_model,
-                        messages=[{
-                            "role": "user",
-                            "content": self.prompts.brief_summary.format(
-                                duration=video_duration,
-                                timeline=timeline,
-                                transcript=transcript
-                            )
-                        }]
-                    )
-                    detailed_text = detailed_response.choices[0].message.content
-                    brief_text = brief_response.choices[0].message.content
-
-            self.logger.debug("Summaries generated successfully.")
-            return {
-                "detailed": detailed_text,
-                "brief": brief_text,
-                "timeline": timeline,
-                "transcript": transcript
-            }
-
-        except Exception as e:
-            self.logger.error(f"Summary generation failed: {str(e)}")
-            return {
-                "detailed": "Error generating detailed summary",
-                "brief": "Error generating brief summary",
-                "timeline": timeline,
-                "transcript": transcript
-            }
-    def analyze_video(self, video_path: str) -> Dict:
-        """
-        Perform comprehensive video analysis.
-
-        Args:
-            video_path: Path to the video file.
-
-        Returns:
-            Dictionary containing summaries, frame analyses, audio segments, and metadata.
-        """
-        self.logger.info(f"Starting video analysis for: {video_path}")
-
-        if not os.path.isfile(video_path):
-            self.logger.error(f"Video file does not exist: {video_path}")
-            raise VideoAnalysisError(f"Video file does not exist: {video_path}")
-
-        try:
-            frames = self._select_and_log_frames(video_path)
-            audio_segments = self._transcribe_audio(video_path)
-            frame_descriptions = self._concurrently_analyze_frames(frames)
-            video_duration = frames[-1].timestamp if frames else 0.0
-            summaries = self._generate_summary(frame_descriptions, audio_segments, video_duration)
-            result = self._compile_results(frames, frame_descriptions, audio_segments, summaries, video_duration)
-
-            self.logger.info("Video analysis completed successfully.")
-            return result
-
-        except VideoAnalyzerError as e:
-            self.logger.error(f"Video analysis failed: {str(e)}")
+            analysis, usage = self.provider.analyze_frame(
+                frame,
+                self._frame_to_base64(frame.image),
+                self.prompts.frame_analysis,
+            )
+            self._record_usage(usage)
+            return analysis
+        except (AuthenticationError, ModelNotFoundError, RateLimitError):
             raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error during video analysis: {str(e)}", exc_info=True)
-            raise VideoAnalysisError("Unexpected error during video analysis.") from e
+        except Exception as exc:
+            if self.strict:
+                raise
+            return FrameAnalysis(
+                timestamp=frame.timestamp,
+                description="Error analyzing frame",
+                scene_type=frame.scene_type.value,
+                selection_reason=frame.selection_reason,
+                difference_score=frame.difference_score,
+                error=str(exc),
+            )
 
-    def _select_and_log_frames(self, video_path: str) -> List[Frame]:
-        """Select key frames using the frame selector and log the count."""
-        frames = self.frame_selector.select_frames(
-            video_path=video_path,
-            min_frames=self.min_frames,
-            max_frames=self.max_frames,
-            frames_per_minute=self.frames_per_minute
+    def _concurrently_analyze_frames(
+        self, frames: list[Frame], cache: AnalysisCache | None = None
+    ) -> list[FrameAnalysis]:
+        results: list[FrameAnalysis] = []
+        pending: list[tuple[int, Frame]] = []
+        for index, frame in enumerate(frames):
+            cached = (
+                cache.read_json(f"frame_analyses/{index:04d}.json")
+                if cache and self.resume
+                else None
+            )
+            if isinstance(cached, dict):
+                try:
+                    results.append(FrameAnalysis(**cached))
+                    self._emit(
+                        "analyzing_frames",
+                        len(results),
+                        len(frames),
+                        f"Reused cached frame at {frame.timestamp:.2f}s",
+                    )
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            pending.append((index, frame))
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(self._analyze_frame, frame): (index, frame)
+                for index, frame in pending
+            }
+            completed = len(results)
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                index, _frame = futures[future]
+                if cache:
+                    cache.write_json(f"frame_analyses/{index:04d}.json", asdict(result))
+                completed += 1
+                self._emit(
+                    "analyzing_frames",
+                    completed,
+                    len(frames),
+                    f"Analyzed frame at {result.timestamp:.2f}s",
+                )
+        return sorted(results, key=lambda item: item.timestamp)
+
+    def _prepare_cache(self, video_path: str) -> AnalysisCache | None:
+        if not self.cache_dir:
+            return None
+        configuration = {
+            "schema_version": "1.2",
+            "provider": self.provider.provider_name,
+            "provider_adapter": self.provider.__class__.__name__,
+            "models": asdict(self.model_config),
+            "prompts": asdict(self.prompts),
+            "frame_selector": self.frame_selector.__class__.__name__,
+            "selection": {
+                "min_frames": self.min_frames,
+                "max_frames": self.max_frames,
+                "frames_per_minute": self.frames_per_minute,
+                **self.frame_selector.selection_parameters(),
+            },
+            "image": {
+                "max_image_dimension": self.max_image_dimension,
+                "jpeg_quality": self.jpeg_quality,
+            },
+            "audio": {
+                "enabled": self.enable_audio,
+                "transcriber": self.audio_transcriber.__class__.__name__,
+            },
+        }
+        key = analysis_cache_key(video_path, configuration)
+        cache = AnalysisCache(self.cache_dir, key)
+        cache.write_json("manifest.json", {"key": key, "configuration": configuration})
+        return cache
+
+    @staticmethod
+    def _format_timeline(frame_descriptions: list[FrameAnalysis]) -> str:
+        return "\n".join(
+            f"Time {item.timestamp:.2f}s ({item.scene_type}; {item.selection_reason}): "
+            f"{item.description}"
+            for item in frame_descriptions
         )
-        self.logger.info(f"Selected {len(frames)} frames for analysis.")
+
+    @staticmethod
+    def _format_transcript(audio_segments: list[AudioSegment]) -> str:
+        if not audio_segments:
+            return "No audio transcript available."
+        return "\n".join(
+            f"[{item.start_time:.1f}s - {item.end_time:.1f}s]: {item.text}"
+            for item in audio_segments
+        )
+
+    def _summary_prompt(self, timeline: str, transcript: str, duration: float) -> str:
+        detailed = self.prompts.detailed_summary.format(
+            duration=duration, timeline=timeline, transcript=transcript
+        )
+        brief = self.prompts.brief_summary.format(
+            duration=duration, timeline=timeline, transcript=transcript
+        )
+        return (
+            "Return one structured result containing a detailed summary, a brief summary, and "
+            "chronological events grounded in the supplied frame timestamps. Do not invent "
+            "events that are not supported by the inputs.\n\n"
+            f"Detailed-summary requirements:\n{detailed}\n\n"
+            f"Brief-summary requirements:\n{brief}"
+        )
+
+    @staticmethod
+    def _fallback_summary(
+        frame_descriptions: list[FrameAnalysis], timeline: str, transcript: str
+    ) -> tuple[SummaryResult, list[TimelineEvent]]:
+        successful = [item for item in frame_descriptions if not item.error]
+        descriptions = [item.description for item in successful]
+        detailed = " ".join(descriptions) or "No frame analyses were completed successfully."
+        brief = " ".join(descriptions[:2]) or detailed
+        events = [
+            TimelineEvent(
+                start_time=item.timestamp,
+                end_time=item.timestamp,
+                description=item.description,
+                source_frame_timestamps=[item.timestamp],
+                objects=list(item.objects),
+                actions=list(item.actions),
+                visible_text=list(item.visible_text),
+            )
+            for item in successful
+        ]
+        return SummaryResult(detailed, brief, timeline, transcript), events
+
+    def _generate_summary(
+        self,
+        frame_descriptions: list[FrameAnalysis],
+        audio_segments: list[AudioSegment],
+        video_duration: float,
+    ) -> tuple[SummaryResult, list[TimelineEvent], str | None]:
+        timeline = self._format_timeline(frame_descriptions)
+        transcript = self._format_transcript(audio_segments)
+        try:
+            summary, events, usage = self.provider.generate_summary(
+                self._summary_prompt(timeline, transcript, video_duration),
+                timeline,
+                transcript,
+            )
+            self._record_usage(usage)
+            return summary, events, None
+        except (AuthenticationError, ModelNotFoundError, RateLimitError):
+            raise
+        except Exception as exc:
+            if self.strict:
+                raise
+            summary, events = self._fallback_summary(frame_descriptions, timeline, transcript)
+            return summary, events, f"Summary generation failed; deterministic fallback used: {exc}"
+
+    def _select_and_log_frames(self, video_path: str) -> list[Frame]:
+        frames = self.frame_selector.select_frames(
+            video_path,
+            self.min_frames,
+            self.max_frames,
+            self.frames_per_minute,
+        )
+        if not frames:
+            raise VideoLoadError("No decodable frames were selected.")
         return frames
 
-    def _concurrently_analyze_frames(self, frames: List[Frame]) -> List[Dict]:
-        """Analyze frames concurrently to improve performance."""
-        frame_descriptions = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_frame = {
-                executor.submit(self._analyze_frame, frame): frame for frame in frames
-            }
-            for future in as_completed(future_to_frame):
-                frame = future_to_frame[future]
-                try:
-                    analysis = future.result()
-                    frame_descriptions.append(analysis)
-                    self.logger.debug(f"Analyzed frame at {analysis['timestamp']:.2f}s.")
-                except Exception as e:
-                    self.logger.error(f"Error analyzing frame at {frame.timestamp}s: {str(e)}")
-                    frame_descriptions.append({
+    def analyze_video_structured(self, video_path: str) -> AnalysisResult:
+        if not os.path.isfile(video_path):
+            raise VideoLoadError(f"Video file does not exist: {video_path}")
+        self._usage = UsageMetadata()
+        started = time.perf_counter()
+        stage_seconds: dict[str, float] = {}
+        warnings: list[str] = []
+        cache = self._prepare_cache(video_path)
+
+        self._emit("probing", message="Probing video metadata")
+        stage_started = time.perf_counter()
+        metadata = probe_video(video_path)
+        stage_seconds["probing"] = time.perf_counter() - stage_started
+
+        self._emit("selecting_frames", message="Selecting key frames")
+        stage_started = time.perf_counter()
+        frames = self._select_and_log_frames(video_path)
+        stage_seconds["selection"] = time.perf_counter() - stage_started
+        selector_metadata = getattr(self.frame_selector, "last_metadata", metadata)
+        if selector_metadata.duration > 0:
+            metadata = selector_metadata
+        if cache:
+            cache.write_json("metadata.json", asdict(metadata))
+            cache.write_json(
+                "selected_frames.json",
+                [
+                    {
                         "timestamp": frame.timestamp,
-                        "description": "Error analyzing frame",
-                        "scene_type": frame.scene_type.value
-                    })
-                time.sleep(0.1)  # Minimal delay to respect rate limits
+                        "scene_type": frame.scene_type.value,
+                        "selection_reason": frame.selection_reason,
+                        "difference_score": frame.difference_score,
+                    }
+                    for frame in frames
+                ],
+            )
 
-        # Sort frame_descriptions by timestamp to maintain order
-        frame_descriptions_sorted = sorted(frame_descriptions, key=lambda x: x['timestamp'])
-        self.logger.debug("Frame descriptions sorted by timestamp.")
-        return frame_descriptions_sorted
+        audio_segments: list[AudioSegment] = []
+        if self.enable_audio:
+            self._emit("extracting_audio", message="Extracting and transcribing audio")
+            stage_started = time.perf_counter()
+            try:
+                cached_transcript = (
+                    cache.read_json("transcript.json") if cache and self.resume else None
+                )
+                if isinstance(cached_transcript, list):
+                    audio_segments = [AudioSegment(**item) for item in cached_transcript]
+                else:
+                    self._emit("transcribing", message="Transcribing audio")
+                    audio_segments = self.audio_transcriber.transcribe(video_path)
+                    if cache:
+                        cache.write_json(
+                            "transcript.json", [asdict(item) for item in audio_segments]
+                        )
+            except Exception as exc:
+                if self.strict:
+                    raise
+                warnings.append(f"Audio transcription failed: {exc}")
+            stage_seconds["transcription"] = time.perf_counter() - stage_started
 
-    def _compile_results(self, frames: List[Frame], frame_descriptions: List[Dict],
-                        audio_segments: List[AudioSegment], summaries: Dict, video_duration: float) -> Dict:
-        """Compile all analysis results into a single dictionary."""
+        self._emit("analyzing_frames", 0, len(frames), "Analyzing selected frames")
+        stage_started = time.perf_counter()
+        frame_descriptions = self._concurrently_analyze_frames(frames, cache=cache)
+        stage_seconds["frame_analysis"] = time.perf_counter() - stage_started
+        failed = sum(bool(item.error) for item in frame_descriptions)
+        if failed:
+            warnings.append(f"{failed} frame analyses failed.")
+        if frame_descriptions and failed / len(frame_descriptions) > self.max_frame_failure_ratio:
+            raise ResponseValidationError(
+                f"Frame failure ratio {failed / len(frame_descriptions):.1%} exceeded "
+                f"the configured {self.max_frame_failure_ratio:.1%}."
+            )
+
+        self._emit("summarizing", message="Generating structured summary")
+        stage_started = time.perf_counter()
+        summary, timeline, summary_warning = self._generate_summary(
+            frame_descriptions, audio_segments, metadata.duration
+        )
+        stage_seconds["summary"] = time.perf_counter() - stage_started
+        if summary_warning:
+            warnings.append(summary_warning)
+
         scene_distribution = {
-            scene_type.value: len([f for f in frames if f.scene_type == scene_type])
+            scene_type.value: sum(frame.scene_type == scene_type for frame in frames)
             for scene_type in SceneType
         }
+        selection = getattr(
+            self.frame_selector,
+            "last_selection_metadata",
+            SelectionMetadata(
+                strategy=self.frame_selector.__class__.__name__,
+                selected_frame_count=len(frames),
+            ),
+        )
+        result = AnalysisResult(
+            summary=summary,
+            timeline=timeline,
+            frame_analyses=frame_descriptions,
+            audio_segments=audio_segments,
+            metadata=AnalysisMetadata(
+                num_frames_analyzed=len(frames),
+                num_audio_segments=len(audio_segments),
+                video_duration=metadata.duration,
+                scene_distribution=scene_distribution,
+                models_used=ModelsUsed(
+                    frame_analysis=self.model_config.vision_model,
+                    summary=self.model_config.text_model,
+                    audio=(self.model_config.audio_model if self.enable_audio else None),
+                    provider=self.provider.provider_name,
+                ),
+                video=metadata,
+                selection=selection,
+                performance=PerformanceMetadata(
+                    total_seconds=time.perf_counter() - started,
+                    stage_seconds=stage_seconds,
+                ),
+                usage=self._usage,
+                successful_frame_analyses=len(frame_descriptions) - failed,
+                failed_frame_analyses=failed,
+            ),
+            warnings=warnings,
+            errors=[item.error for item in frame_descriptions if item.error],
+        )
+        self._emit("complete", len(frames), len(frames), "Video analysis complete")
+        if cache:
+            cache.write_json("result.json", result.to_dict())
+        return result
 
-        return {
-            "summary": summaries["detailed"],
-            "brief_summary": summaries["brief"],
-            "timeline": summaries["timeline"],
-            "transcript": summaries["transcript"],
-            "frame_analyses": frame_descriptions,
-            "audio_segments": [
-                {
-                    "text": segment.text,
-                    "start_time": segment.start_time,
-                    "end_time": segment.end_time,
-                    "confidence": segment.confidence
-                }
-                for segment in audio_segments
-            ],
-            "metadata": {
-                "num_frames_analyzed": len(frames),
-                "num_audio_segments": len(audio_segments),
-                "video_duration": video_duration,
-                "scene_distribution": scene_distribution,
-                "models_used": {
-                    "vision": self.model_config.vision_model,
-                    "text": self.model_config.text_model,
-                    "audio": self.model_config.audio_model
-                }
-            }
-        }
+    def analyze_video(self, video_path: str) -> dict[str, object]:
+        """Analyze a video and return the backward-compatible dictionary shape."""
+        return self.analyze_video_structured(video_path).to_legacy_dict()
+
+    def _compile_results(
+        self,
+        frames: list[Frame],
+        frame_descriptions: list[dict[str, object] | FrameAnalysis],
+        audio_segments: list[AudioSegment],
+        summaries: dict[str, object],
+        video_duration: float,
+    ) -> dict[str, object]:
+        """Compatibility helper retained for callers that subclassed v1.1."""
+        normalized = [
+            item
+            if isinstance(item, FrameAnalysis)
+            else FrameAnalysis(
+                timestamp=float(item.get("timestamp", 0)),
+                description=str(item.get("description", "")),
+                scene_type=str(item.get("scene_type", SceneType.STATIC.value)),
+                selection_reason=str(item.get("selection_reason", "uniform_fill")),
+                error=item.get("error") if isinstance(item.get("error"), str) else None,
+            )
+            for item in frame_descriptions
+        ]
+        timeline_text = str(summaries.get("timeline", self._format_timeline(normalized)))
+        transcript = str(summaries.get("transcript", self._format_transcript(audio_segments)))
+        result = AnalysisResult(
+            summary=SummaryResult(
+                detailed=str(summaries.get("detailed", "")),
+                brief=str(summaries.get("brief", "")),
+                timeline=timeline_text,
+                transcript=transcript,
+            ),
+            frame_analyses=normalized,
+            audio_segments=audio_segments,
+            metadata=AnalysisMetadata(
+                num_frames_analyzed=len(frames),
+                num_audio_segments=len(audio_segments),
+                video_duration=video_duration,
+                scene_distribution={
+                    scene_type.value: sum(frame.scene_type == scene_type for frame in frames)
+                    for scene_type in SceneType
+                },
+                models_used=ModelsUsed(
+                    self.model_config.vision_model,
+                    self.model_config.text_model,
+                    self.model_config.audio_model,
+                    self.provider.provider_name,
+                ),
+            ),
+        )
+        return result.to_legacy_dict()
+
+
+# These imports historically came from openscenesense.analyzer.
+__all__ = [
+    "AudioTranscriptionError",
+    "FrameAnalysisError",
+    "VideoAnalyzer",
+    "VideoAnalyzerError",
+    "VideoAnalysisError",
+    "OpenSceneSenseError",
+]
