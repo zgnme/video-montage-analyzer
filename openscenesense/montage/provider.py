@@ -26,6 +26,9 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
         if not config.get(field):
             raise ValueError(f"Missing {field} in dedicated video-montage configuration")
     config.setdefault("MONTAGE_API_MODE", "responses")
+    config.setdefault("MONTAGE_REASONING_EFFORT", "low")
+    if config["MONTAGE_REASONING_EFFORT"] not in ("none", "low", "high", "max"):
+        raise ValueError("MONTAGE_REASONING_EFFORT must be none, low, high or max")
     if config["MONTAGE_API_MODE"] not in ("responses", "chat_completions"):
         raise ValueError("API mode must be responses or chat_completions")
     url = urlsplit(config["MONTAGE_BASE_URL"])
@@ -76,15 +79,24 @@ def validate_analysis(data: dict, frame_count: int) -> dict:
 
 class VisionAPI:
     def __init__(self, config: dict):
+        allowed = {
+            x.strip() for x in config.get("MONTAGE_ALLOWED_MODELS", "").split(",") if x.strip()
+        }
+        if allowed and config["MONTAGE_MODEL"] not in allowed:
+            raise ValueError(
+                "Model is outside the dedicated allowed-model list; no API request sent"
+            )
         self.config = config
         self.calls = 0
         self.usage = []
 
     @property
     def identity(self) -> dict:
-        return {
+        identity = {
             k: self.config[k] for k in ("MONTAGE_BASE_URL", "MONTAGE_MODEL", "MONTAGE_API_MODE")
         }
+        identity["MONTAGE_REASONING_EFFORT"] = self.config.get("MONTAGE_REASONING_EFFORT", "low")
+        return identity
 
     def request(self, prompt: str, frames: list[tuple[Path, float]]) -> dict:
         mode = self.config["MONTAGE_API_MODE"]
@@ -102,18 +114,29 @@ class VisionAPI:
             else:
                 content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
         payload = {"model": self.config["MONTAGE_MODEL"], "stream": True}
+        output_limit = int(self.config.get("MONTAGE_MAX_OUTPUT_TOKENS", "8192"))
+        if not 1024 <= output_limit <= 32768:
+            raise ValueError("MONTAGE_MAX_OUTPUT_TOKENS must be between 1024 and 32768")
         if mode == "responses":
             payload.update(
                 {
                     "input": [{"role": "user", "content": content}],
-                    "max_output_tokens": 3000,
+                    "max_output_tokens": output_limit,
                     "store": False,
+                    "reasoning": {"effort": self.config.get("MONTAGE_REASONING_EFFORT", "low")},
                 }
             )
             endpoint = "/responses"
         else:
-            payload.update({"messages": [{"role": "user", "content": content}], "max_tokens": 3000})
+            payload.update(
+                {"messages": [{"role": "user", "content": content}], "max_tokens": output_limit}
+            )
             endpoint = "/chat/completions"
+            effort = self.config.get("MONTAGE_REASONING_EFFORT", "low")
+            if "deepseek" in self.config["MONTAGE_MODEL"].lower():
+                payload["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+                if effort != "none":
+                    payload["reasoning_effort"] = effort
         headers = {"Authorization": "Bearer " + self.config["MONTAGE_API_KEY"]}
         for attempt in range(2):
             self.calls += 1
@@ -134,7 +157,22 @@ class VisionAPI:
                             f"Vision API HTTP {response.status_code}; no model fallback"
                         )
                     text, usage = self._read(response)
-            self.usage.append(usage)
+            # Keep portable accounting, not gateway-specific per-item attribution payloads.
+            self.usage.append(
+                {
+                    k: usage[k]
+                    for k in (
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "input_tokens_details",
+                        "output_tokens_details",
+                    )
+                    if k in usage
+                }
+            )
             return parse_json(text)
         raise RuntimeError("Vision API retry exhausted")
 

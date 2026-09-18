@@ -1,6 +1,9 @@
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -81,6 +84,26 @@ def test_short_insert_and_cut_frames_are_preserved(clip, tmp_path):
     assert g > r and g > b
 
 
+def test_packet_pts_fast_path_matches_decoded_b_frames(clip):
+    expected_raw = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_frames",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+            "-of",
+            "json",
+            str(clip),
+        ]
+    )
+    decoded = [float(x["best_effort_timestamp_time"]) for x in json.loads(expected_raw)["frames"]]
+    assert media.frame_times(clip) == pytest.approx([x - decoded[0] for x in decoded], abs=1e-6)
+
+
 def test_variable_frame_rate_uses_presentation_times(clip, tmp_path):
     vfr = tmp_path / "vfr.mp4"
     subprocess.run(
@@ -106,6 +129,17 @@ def test_variable_frame_rate_uses_presentation_times(clip, tmp_path):
     assert shots[1]["start"] == pytest.approx(1, abs=0.035)
     assert shots[2]["start"] == pytest.approx(1 + 2 / 15, abs=0.035)
     assert times[-1] > 2.9
+
+
+def test_ffmpeg_proxy_preserves_short_insert_and_timing(clip, tmp_path):
+    times = media.frame_times(clip)
+    metadata = media.probe(clip)
+    metadata["codec"] = "av1"  # Exercise the mandatory FFmpeg decoder fallback.
+    decoded = media.decode_source(clip, metadata, times, tmp_path, 320)
+    assert decoded != clip
+    assert media.frame_times(decoded) == pytest.approx(times, abs=0.003)
+    shots = media.detect_shots(decoded, times, metadata["duration"], 27)
+    assert [s["start"] for s in shots] == pytest.approx([0, 1, 32 / 30], abs=0.002)
 
 
 def test_long_continuous_shot_has_no_window_gaps():
@@ -194,6 +228,13 @@ def test_foreign_credentials_are_not_used(tmp_path, monkeypatch):
         provider.load_config(tmp_path / "absent.env")
 
 
+def test_disallowed_model_is_blocked_before_any_request():
+    with pytest.raises(ValueError, match="no API request"):
+        provider.VisionAPI(
+            {"MONTAGE_ALLOWED_MODELS": "deepseek-flash", "MONTAGE_MODEL": "gpt-5.6-luna"}
+        )
+
+
 def test_cyrillic_transcript_preserved(tmp_path):
     f = tmp_path / "speech.txt"
     f.write_text("[00001.000 --> 00002.000] Камера приближается.\n")
@@ -249,3 +290,40 @@ def test_output_lock_prevents_duplicate_processing(tmp_path):
         with pytest.raises(ValueError, match="Another run"):
             with cli.lock(tmp_path):
                 pytest.fail("lock must exclude second run")
+
+
+def test_termination_stops_owned_media_child(tmp_path):
+    marker = tmp_path / "child.pid"
+    child_code = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    parent_code = (
+        "from openscenesense.montage.media import run; "
+        f"run([{sys.executable!r}, '-c', {child_code!r}])"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 8
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "Media child never started"
+        child_pid = int(marker.read_text())
+        parent.send_signal(signal.SIGTERM)
+        parent.communicate(timeout=8)
+        state = subprocess.run(
+            ["ps", "-p", str(child_pid), "-o", "stat="], capture_output=True, text=True
+        )
+        assert not state.stdout.strip() or state.stdout.strip().startswith("Z")
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.communicate()
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

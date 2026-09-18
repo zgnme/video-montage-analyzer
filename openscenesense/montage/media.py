@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import signal
 import subprocess
+import threading
 import wave
 from pathlib import Path
 
@@ -13,11 +16,35 @@ from scenedetect.detectors import AdaptiveDetector, ContentDetector
 
 
 def run(argv: list[str], timeout: int = 3600) -> bytes:
-    result = subprocess.run(argv, capture_output=True, timeout=timeout)
-    if result.returncode:
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+    )
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def interrupted(signum, frame):
+            raise KeyboardInterrupt("Media operation interrupted")
+
+        signal.signal(signal.SIGTERM, interrupted)
+    try:
+        stdout, _ = process.communicate(timeout=timeout)
+    except BaseException:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+        raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    if process.returncode:
         # Do not include arbitrary subprocess output (media metadata may be untrusted).
-        raise RuntimeError(f"{Path(argv[0]).name} failed (exit {result.returncode})")
-    return result.stdout
+        raise RuntimeError(f"{Path(argv[0]).name} failed (exit {process.returncode})")
+    return stdout
 
 
 def digest(path: Path) -> str:
@@ -46,6 +73,7 @@ def probe(path: Path) -> dict:
         raise ValueError("Video duration is invalid")
     return {
         "duration": duration,
+        "codec": video.get("codec_name", "unknown"),
         "width": int(video["width"]),
         "height": int(video["height"]),
         "has_audio": any(s["codec_type"] == "audio" for s in data["streams"]),
@@ -54,11 +82,45 @@ def probe(path: Path) -> dict:
 
 def frame_times(path: Path) -> list[float]:
     # Preserve presentation timestamps: extracted I-frame numbering / FPS is NOT time.
+    # MP4 exposes per-packet PTS and an authoritative frame count. Avoid decoding AV1
+    # just to read its clock; fall back when packets cannot map one-to-one to frames.
+    packet_data = json.loads(
+        run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_packets",
+                "-show_streams",
+                "-show_entries",
+                "packet=pts_time:stream=nb_frames",
+                "-of",
+                "json",
+                str(path),
+            ]
+        )
+    )
+    packets = packet_data.get("packets", [])
+    declared = packet_data.get("streams", [{}])[0].get("nb_frames", "0")
+    try:
+        packet_times = sorted(float(p["pts_time"]) for p in packets)
+        if (
+            int(declared) == len(packet_times) > 0
+            and len(set(packet_times)) == len(packet_times)
+            and all(math.isfinite(t) for t in packet_times)
+        ):
+            return [t - packet_times[0] for t in packet_times]
+    except (KeyError, ValueError, TypeError):
+        pass
     raw = run(
         [
             "ffprobe",
             "-v",
             "error",
+            "-threads",
+            "2",
             "-select_streams",
             "v:0",
             "-show_frames",
@@ -83,6 +145,62 @@ def frame_times(path: Path) -> list[float]:
     return [t - origin for t in times]
 
 
+def decode_source(path: Path, metadata: dict, times: list[float], workdir: Path, size: int) -> Path:
+    """Use system FFmpeg when wheel-bundled OpenCV cannot decode the source codec."""
+    import cv2
+
+    supported = False
+    if metadata.get("codec") != "av1":
+        cap = cv2.VideoCapture(str(path))
+        try:
+            supported = cap.isOpened() and cap.read()[0]
+        finally:
+            cap.release()
+    if supported:
+        return path
+    print("Creating an H.264 decode proxy with system FFmpeg; preserving frame timing…", flush=True)
+    proxy = workdir / "decode-proxy.mp4"
+    temporary = workdir / "decode-proxy.tmp.mp4"
+    # Keep source frame order and variable timing. Audio is handled from the original file.
+    scale = f"scale=w='min({size},iw)':h=-2:flags=lanczos,setpts=PTS-STARTPTS"
+    run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-threads",
+            "2",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-vf",
+            scale,
+            "-an",
+            "-fps_mode",
+            "passthrough",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "14",
+            "-threads",
+            "2",
+            str(temporary),
+        ]
+    )
+    proxy_times = frame_times(temporary)
+    if len(proxy_times) != len(times) or any(
+        abs(a - b) > 0.003 for a, b in zip(times, proxy_times, strict=False)
+    ):
+        temporary.unlink(missing_ok=True)
+        raise ValueError("Decode proxy changed frame count/timing; refusing shifted evidence")
+    temporary.replace(proxy)
+    return proxy
+
+
 def detect_shots(path: Path, times: list[float], duration: float, threshold: float) -> list[dict]:
     video = open_video(str(path))
     manager = SceneManager()
@@ -90,7 +208,9 @@ def detect_shots(path: Path, times: list[float], duration: float, threshold: flo
     manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=1))
     manager.add_detector(AdaptiveDetector(min_scene_len=1))
     try:
-        manager.detect_scenes(video, show_progress=False)
+        processed = manager.detect_scenes(video, show_progress=False)
+        if processed != len(times):
+            raise ValueError("Scene detector did not decode every source frame")
         scenes = manager.get_scene_list(start_in_scene=True)
     finally:
         # VideoStreamCv2 has no public close method in the pinned release.

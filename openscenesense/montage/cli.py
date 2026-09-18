@@ -15,6 +15,7 @@ from pathlib import Path
 from .media import (
     audio_energy,
     build_windows,
+    decode_source,
     detect_shots,
     digest,
     extract_frames,
@@ -74,7 +75,8 @@ def prepare(args) -> dict:
         return manifest
     print("Scanning full video for candidate cuts and presentation timestamps…", flush=True)
     times = frame_times(source)
-    shots = detect_shots(source, times, meta["duration"], args.threshold)
+    decoded = decode_source(source, meta, times, args.output, args.frame_size)
+    shots = detect_shots(decoded, times, meta["duration"], args.threshold)
     windows = build_windows(shots, times, meta["duration"], args.fps, args.max_frames)
     if len(windows) > args.max_windows:
         raise ValueError(
@@ -85,7 +87,7 @@ def prepare(args) -> dict:
         f"{len(shots)} candidate shots; {len(windows)} API windows; {len(indices)} unique frames",
         flush=True,
     )
-    paths = extract_frames(source, times, indices, args.output / "frames", args.frame_size)
+    paths = extract_frames(decoded, times, indices, args.output / "frames", args.frame_size)
     for window in windows:
         window["frames"] = [
             {
@@ -106,6 +108,7 @@ def prepare(args) -> dict:
         "plan_key": plan_key,
         "settings": settings,
         "source": str(source),
+        "decode_proxy_used": decoded != source,
         "metadata": meta,
         "shots": shots,
         "windows": windows,
@@ -199,6 +202,10 @@ def prompt_for(window: dict, transcript: list[dict], audio: dict, context: list[
 
 def analyze(args, manifest: dict) -> int:
     config = load_config(args.config)
+    if getattr(args, "model", None):
+        config["MONTAGE_MODEL"] = args.model
+    if getattr(args, "reasoning", None):
+        config["MONTAGE_REASONING_EFFORT"] = args.reasoning
     api = VisionAPI(config)
     if args.transcribe:
         if args.transcript:
@@ -268,7 +275,7 @@ def analyze(args, manifest: dict) -> int:
         "analyses": results,
     }
     write_json(args.output / "result.json", result)
-    render(manifest, results, args.output, result["status"])
+    render(manifest, results, args.output, result["status"], api.identity)
     print(
         json.dumps(
             {k: v for k, v in result.items() if k not in ("analyses", "usage_this_run")},
@@ -279,7 +286,9 @@ def analyze(args, manifest: dict) -> int:
     return 0 if complete else 2
 
 
-def render(manifest: dict, results: dict, output: Path, status: str) -> None:
+def render(
+    manifest: dict, results: dict, output: Path, status: str, provider_identity: dict | None = None
+) -> None:
     duration = manifest["metadata"]["duration"]
     shots = manifest["shots"]
     lines = [
@@ -303,6 +312,13 @@ def render(manifest: dict, results: dict, output: Path, status: str) -> None:
         f"<h1>Разбор монтажа</h1><p>{html.escape(status)}: {len(results)} / "
         f"{len(manifest['windows'])} участков</p>",
     ]
+    if provider_identity:
+        label = (
+            f"Модель: {provider_identity.get('MONTAGE_MODEL', 'test')}; "
+            f"reasoning: {provider_identity.get('MONTAGE_REASONING_EFFORT', 'unspecified')}"
+        )
+        lines.extend([label, ""])
+        html_parts.append(f"<p>{html.escape(label)}</p>")
     for window in manifest["windows"]:
         title = f"{window['start']:.3f}–{window['end']:.3f} с · {window['kind']} · {window['id']}"
         lines.extend([f"## {title}", ""])
@@ -345,6 +361,8 @@ def main() -> int:
     parser.add_argument("video", type=Path, nargs="?")
     parser.add_argument("--output", "-o", type=Path)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--model", help="Explicit override for this run; does not change defaults")
+    parser.add_argument("--reasoning", choices=["none", "low", "high", "max"])
     parser.add_argument("--fps", type=float, default=4)
     parser.add_argument("--max-frames", type=int, default=24)
     parser.add_argument("--frame-size", type=int, default=960)
