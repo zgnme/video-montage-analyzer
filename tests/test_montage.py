@@ -327,3 +327,23 @@ def test_termination_stops_owned_media_child(tmp_path):
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_precision_prepares_all_real_frames_and_checks_resume_integrity(clip, tmp_path):
+    from openscenesense.montage.quality_plan import prepare
+
+    args = args_for(clip, tmp_path)
+    args.source_offset = 20
+    args.core_frames = 16
+    args.context_frames = 4
+    args.max_frames_total = 1000
+    args.output.mkdir()
+    plan = prepare(args)
+    assert len(plan["frames"]) == 62
+    assert [c["index"] for c in plan["candidates"]] == [30, 32]
+    assert plan["candidates"][0]["time"] == 21
+    assert prepare(args) == plan
+    frame = args.output / plan["frames"][30]["path"]
+    frame.write_bytes(b"corrupted evidence")
+    with pytest.raises(ValueError, match="Evidence changed"):
+        prepare(args)

@@ -5,6 +5,10 @@ the new montage path replaces independent image captions with ordered multi-imag
 Upstream base: `ef38012341fef88d40c4b8a596b4c1a5d361f8dc`.
 No ShotParser code is included: no explicit license was found in that repository.
 
+For detailed montage work, use the new [precision mode](precision-mode.md): all input frames,
+up to ten parallel requests, independent boundary reviews and a durable usage ledger.
+The sampled `prepare/analyze` commands described below remain available for compatibility.
+
 ## Selection and qualification
 
 OpenSceneSense is the reusable package/test/provider foundation, **not a demonstrated best
@@ -53,8 +57,9 @@ the default. This is a cap, not a claim that every call consumes 8,192 tokens.
 configuration. Default reasoning is `low`; `high`/`max` remain available. Actual provider,
 model and effort are recorded in results and separated in the cache identity.
 The deployed allowed-model list permits only `deepseek-flash`. A per-run override to any
-other model is rejected before a request. The user has specifically prohibited Luna and
-Anthropic testing; changing this deployment policy requires a new explicit user choice.
+other model is rejected before a request. The user subsequently authorized Luna for qualification; a process-local
+`MONTAGE_ALLOWED_MODELS=gpt-5.6-luna` override with `--model gpt-5.6-luna` implements that choice.
+DeepSeek remains the default. Anthropic is not authorized for this tool.
 The application uses only its dedicated configuration and MONTAGE_* environment variables.
 There is no fallback to Anthropic, another model, or a different host. Redirects are not followed.
 

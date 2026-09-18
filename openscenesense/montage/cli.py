@@ -355,6 +355,10 @@ def render(
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "precision":
+        from .quality_cli import main as precision_main
+
+        return precision_main(sys.argv[2:])
     os.umask(0o077)
     parser = argparse.ArgumentParser(description="Shot-aware multi-image API montage analysis")
     parser.add_argument("command", choices=["prepare", "analyze", "doctor"])

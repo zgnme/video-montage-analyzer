@@ -78,7 +78,7 @@ def validate_analysis(data: dict, frame_count: int) -> dict:
 
 
 class VisionAPI:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, max_attempts: int = 2):
         allowed = {
             x.strip() for x in config.get("MONTAGE_ALLOWED_MODELS", "").split(",") if x.strip()
         }
@@ -89,6 +89,7 @@ class VisionAPI:
         self.config = config
         self.calls = 0
         self.usage = []
+        self.max_attempts = max_attempts
 
     @property
     def identity(self) -> dict:
@@ -138,7 +139,7 @@ class VisionAPI:
                 if effort != "none":
                     payload["reasoning_effort"] = effort
         headers = {"Authorization": "Bearer " + self.config["MONTAGE_API_KEY"]}
-        for attempt in range(2):
+        for attempt in range(self.max_attempts):
             self.calls += 1
             with httpx.Client(
                 timeout=httpx.Timeout(180, connect=20), follow_redirects=False
@@ -149,7 +150,10 @@ class VisionAPI:
                     headers=headers,
                     json=payload,
                 ) as response:
-                    if response.status_code in (429, 500, 502, 503, 504) and attempt == 0:
+                    if (
+                        response.status_code in (429, 500, 502, 503, 504)
+                        and attempt + 1 < self.max_attempts
+                    ):
                         time.sleep(2)
                         continue
                     if response.status_code != 200:

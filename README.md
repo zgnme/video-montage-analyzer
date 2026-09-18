@@ -1,3 +1,7 @@
+> This fork adds a ready-to-use [precision montage analyzer](Docs/precision-mode.md):
+> all source frames, up to 10 parallel vision requests, independent boundary checks,
+> resumable accounting and a [Hermes skill](hermes-skill/SKILL.md).
+
 # OpenSceneSense
 
 > **Video montage fork:** shot-aware multi-image API analysis, dense transition evidence,
