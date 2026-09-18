@@ -29,6 +29,9 @@ venv/
 ENV/
 env/
 .env
+*.env
+montage-output/
+qualification-output/
 
 # IDE
 .idea/

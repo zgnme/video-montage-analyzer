@@ -1,5 +1,9 @@
 # OpenSceneSense
 
+> **Video montage fork:** shot-aware multi-image API analysis, dense transition evidence,
+> timed transcripts, resumable runs and a Hermes skill. See [fork documentation](Docs/montage-fork.md).
+> Default deployment uses DeepSeek V4.1 Flash (`deepseek-flash`) through a dedicated API key.
+
 Turn video into structured, timestamped scene intelligence without installing a local ML stack.
 
 OpenSceneSense samples the most useful frames, transcribes optional audio, analyzes visual content with OpenAI or OpenRouter, and returns summaries, events, metadata, timing, and usage information. It is designed for applications, batch pipelines, dataset tooling, and anything that needs a dependable JSON result rather than a demo-only paragraph.

@@ -29,6 +29,9 @@ dependencies = [
     "opencv-python>=4.10.0,<6",
     "Pillow>=11.0.0,<13",
     "ffmpeg-python>=0.2.0,<0.3",
+    "scenedetect==0.6.7.1",
+    "python-dotenv>=1,<2",
+    "httpx>=0.28,<1",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +46,7 @@ dev = [
 
 [project.scripts]
 openscenesense = "openscenesense.cli:main"
+video-montage = "openscenesense.montage.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openscenesense"]
